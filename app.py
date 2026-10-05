@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 团委学生会物资管理系统（Streamlit Cloud + Supabase 完整版）
-功能：出入库、批量导入、库存查询、学期查询、预警、导出、邮箱/学号登录、
-      Operator / 普通Admin / 永久Admin 三级权限、密码修改2次限制
 """
 
 import io
@@ -13,6 +11,7 @@ import pandas as pd
 import psycopg2
 import streamlit as st
 from passlib.hash import bcrypt
+from openpyxl.worksheet.datavalidation import DataValidation
 
 st.set_page_config(page_title="团委学生会物资管理", layout="wide")
 
@@ -154,7 +153,6 @@ def update_user_profile(email, name, student_id):
     conn.close()
 
 def transfer_admin(from_email, to_email):
-    """普通 Admin 转让权限"""
     if from_email == to_email:
         return False, "不能转让给自己"
     conn = get_conn()
@@ -166,14 +164,12 @@ def transfer_admin(from_email, to_email):
             return False, "系统错误：找不到您的账号"
         if from_row[1]:
             return False, "您是永久 Admin，不能通过此方式转让。"
-
         cur.execute("SELECT role FROM app_users WHERE email = %s", (to_email,))
         row = cur.fetchone()
         if not row:
             return False, "目标用户不存在"
         if row[0] == "admin":
             return False, "目标用户已是管理员"
-
         cur.execute("UPDATE app_users SET role = 'operator', is_permanent_admin = FALSE WHERE email = %s", (from_email,))
         cur.execute("UPDATE app_users SET role = 'admin', is_permanent_admin = FALSE WHERE email = %s", (to_email,))
         conn.commit()
@@ -186,7 +182,6 @@ def transfer_admin(from_email, to_email):
         conn.close()
 
 def set_permanent_admin(target_email, is_permanent):
-    """永久 Admin 设置/取消某用户的永久 Admin 权限"""
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -194,12 +189,10 @@ def set_permanent_admin(target_email, is_permanent):
         op_row = cur.fetchone()
         if not op_row or not op_row[0]:
             return False, "只有永久 Admin 可以执行此操作"
-
         cur.execute("SELECT role FROM app_users WHERE email = %s", (target_email,))
         row = cur.fetchone()
         if not row:
             return False, "目标用户不存在"
-
         if is_permanent:
             cur.execute("UPDATE app_users SET role = 'admin', is_permanent_admin = TRUE WHERE email = %s", (target_email,))
             msg = f"✅ 已将 {target_email} 设为永久 Admin"
@@ -216,7 +209,6 @@ def set_permanent_admin(target_email, is_permanent):
         conn.close()
 
 def set_normal_admin(target_email):
-    """永久 Admin 设置普通 Admin（普通 Admin 唯一，原有的会被降级）"""
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -224,7 +216,6 @@ def set_normal_admin(target_email):
         op_row = cur.fetchone()
         if not op_row or not op_row[0]:
             return False, "只有永久 Admin 可以执行此操作"
-
         cur.execute("SELECT role, is_permanent_admin FROM app_users WHERE email = %s", (target_email,))
         target_row = cur.fetchone()
         if not target_row:
@@ -233,7 +224,6 @@ def set_normal_admin(target_email):
             return False, "目标用户已是永久 Admin，无需再设为普通 Admin"
         if target_row[0] == "admin" and not target_row[1]:
             return False, "目标用户已是普通 Admin"
-
         cur.execute("UPDATE app_users SET role = 'operator' WHERE role = 'admin' AND is_permanent_admin = FALSE")
         cur.execute("UPDATE app_users SET role = 'admin', is_permanent_admin = FALSE WHERE email = %s", (target_email,))
         conn.commit()
@@ -265,7 +255,6 @@ def delete_user(email):
     conn.close()
 
 def list_users(keyword=""):
-    """查询用户列表（注意：PostgreSQL 保留大写列名需要加双引号）"""
     conn = get_conn()
     sql = ('SELECT email AS 邮箱, name AS 姓名, student_id AS 学号, role AS 角色, '
            'is_permanent_admin AS "永久Admin", password_change_count AS 已修改次数, '
@@ -288,17 +277,14 @@ def change_user_password(current_login_email, input_email, input_name, input_stu
     if not row:
         cur.close(); conn.close(); return False, "系统错误：用户不存在"
     db_email, db_name, db_student_id, change_count = row
-
     if input_email.strip() != db_email:
         cur.close(); conn.close(); return False, "❌ 输入的邮箱与当前登录账号不匹配"
     if input_name.strip() != db_name:
         cur.close(); conn.close(); return False, "❌ 输入的姓名与系统记录不匹配"
     if input_student_id.strip() != db_student_id:
         cur.close(); conn.close(); return False, "❌ 输入的学号与系统记录不匹配"
-
     if change_count >= 2:
         cur.close(); conn.close(); return False, "您已经修改过 2 次密码，不能再自行修改。请联系管理员重置。"
-
     cur.execute("UPDATE app_users SET password_hash = %s, password_change_count = password_change_count + 1 WHERE email = %s",
                 (bcrypt.hash(new_password), current_login_email))
     conn.commit()
@@ -322,15 +308,24 @@ def get_stock(item_name):
     return row[0] if row else 0
 
 def _parse_datetime(row):
-    d = row.get("日期"); t = row.get("时间", "00:00:00")
-    if d is None or pd.isna(d): raise ValueError("日期不能为空")
+    """从 Excel 一行数据解析出 'YYYY-MM-DD HH:MM:SS'（Excel 中已无时间列，统一用 00:00:00）"""
+    d = row.get("日期")
+    if d is None or pd.isna(d):
+        raise ValueError("日期不能为空")
     d_str = pd.to_datetime(d).strftime("%Y-%m-%d")
-    if t is None or pd.isna(t) or str(t).strip() == "": t_str = "00:00:00"
+    # Excel 模板已无"时间"列，若仍存在则解析；否则默认为 00:00:00
+    t = row.get("时间", None)
+    if t is None or pd.isna(t) or str(t).strip() == "":
+        t_str = "00:00:00"
     else:
-        t_str = str(t).strip(); parts = t_str.split(":")
-        if len(parts) == 2: t_str = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:00"
-        elif len(parts) == 3: t_str = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:{parts[2].zfill(2)}"
-        else: t_str = "00:00:00"
+        t_str = str(t).strip()
+        parts = t_str.split(":")
+        if len(parts) == 2:
+            t_str = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:00"
+        elif len(parts) == 3:
+            t_str = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:{parts[2].zfill(2)}"
+        else:
+            t_str = "00:00:00"
     return f"{d_str} {t_str}"
 
 def import_logs_from_excel(df, default_operator):
@@ -506,15 +501,44 @@ def export_to_excel(keyword="", category="全部", include_logs=False, log_start
     return output.getvalue()
 
 def generate_import_template():
+    """生成带下拉选择的 Excel 模板（类别、类型为下拉）"""
     today = date.today().strftime("%Y-%m-%d")
     template_df = pd.DataFrame({
-        "物品名称": ["示例：中性笔", "示例：A4纸"], "类别": ["办公用品", "办公用品"],
-        "类型": ["入库", "出库"], "数量": [20, 5], "日期": [today, today],
-        "时间": ["10:00:00", "14:30:00"], "操作人": ["张三", "李四"], "备注": ["示例行，可删除", "示例行，可删除"],
+        "物品名称": ["示例：中性笔", "示例：A4纸"],
+        "类别": ["办公用品", "办公用品"],
+        "类型": ["入库", "出库"],
+        "数量": [20, 5],
+        "日期": [today, today],
+        "操作人": ["张三", "李四"],
+        "备注": ["示例行，可删除", "示例行，可删除"],
     })
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         template_df.to_excel(writer, sheet_name="出入库导入", index=False)
+        wb = writer.book
+        ws = writer.sheets["出入库导入"]
+        # 类别列（B 列）下拉
+        dv_category = DataValidation(
+            type="list",
+            formula1=f'"{",".join(CATEGORIES)}"',
+            allow_blank=True,
+            showDropDown=False,   # False 表示显示下拉箭头
+        )
+        dv_category.error = "请从下拉列表中选择类别"
+        dv_category.errorTitle = "类别无效"
+        ws.add_data_validation(dv_category)
+        dv_category.add("B2:B1000")
+        # 类型列（C 列）下拉
+        dv_type = DataValidation(
+            type="list",
+            formula1='"入库,出库"',
+            allow_blank=False,
+            showDropDown=False,
+        )
+        dv_type.error = "类型只能填「入库」或「出库」"
+        dv_type.errorTitle = "类型无效"
+        ws.add_data_validation(dv_type)
+        dv_type.add("C2:C1000")
     return output.getvalue()
 
 def _register_chinese_font():
@@ -628,7 +652,7 @@ if "📝 录入出入库" in tab_dict:
         if mode == "✍️ 单条录入":
             existing_items = get_all_items()
             with st.form("entry_form", clear_on_submit=True):
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 with col1:
                     if existing_items:
                         item_name = st.selectbox("物品名称 *", options=existing_items, index=None, accept_new_options=True, placeholder="输入首字即可搜索，或输入新物品", key="item_select")
@@ -638,10 +662,8 @@ if "📝 录入出入库" in tab_dict:
                 with col2:
                     change_type_cn = st.selectbox("类型 *", ["入库", "出库"])
                     quantity = st.number_input("数量 *", min_value=0.01, step=1.0, format="%.2f")
-                with col3:
-                    log_date = st.date_input("日期 *", value=date.today())
-                    log_time_part = st.time_input("时间 *", value=datetime.now().time().replace(second=0, microsecond=0))
-                col4, col5 = st.columns(2)
+                col3, col4, col5 = st.columns(3)
+                with col3: log_date = st.date_input("日期 *", value=date.today())
                 with col4: operator = st.text_input("操作人 *", value=st.session_state.name or "")
                 with col5: note = st.text_input("备注")
                 if st.form_submit_button("提交", type="primary"):
@@ -651,7 +673,8 @@ if "📝 录入出入库" in tab_dict:
                     if errors:
                         for e in errors: st.error(e)
                     else:
-                        log_time = datetime.combine(log_date, log_time_part).strftime("%Y-%m-%d %H:%M:%S")
+                        # 时间统一记为 00:00:00
+                        log_time = f"{log_date.strftime('%Y-%m-%d')} 00:00:00"
                         change_type = "IN" if change_type_cn == "入库" else "OUT"
                         clean_name = str(item_name).strip(); clean_operator = operator.strip()
                         if change_type == "OUT":
@@ -664,7 +687,13 @@ if "📝 录入出入库" in tab_dict:
                             insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
                             st.success(f"✅ 已录入入库：{clean_name} × {quantity}")
         else:
-            st.markdown("##### 📋 使用说明"); st.markdown("1. 下载模板 2. 填写 3. 上传 4. 确认导入")
+            st.markdown("##### 📋 使用说明")
+            st.markdown("""
+            1. 点击下方按钮下载 Excel 模板
+            2. 按模板格式填写（**物品名称、类别、类型、数量、日期**为必填）
+            3. **类别**和**类型**列点击单元格会出现下拉箭头，直接从列表中选择即可
+            4. 上传填好的 Excel 文件，确认导入
+            """)
             col1, col2 = st.columns(2)
             with col1: st.download_button("⬇️ 下载 Excel 模板", generate_import_template(), file_name="出入库导入模板.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             uploaded_file = st.file_uploader("上传填好的 Excel 文件（.xlsx）", type=["xlsx"], key="import_file")
@@ -672,7 +701,7 @@ if "📝 录入出入库" in tab_dict:
                 try:
                     df_import = pd.read_excel(uploaded_file, sheet_name=0)
                     df_import.columns = [str(c).strip() for c in df_import.columns]
-                    required_cols = {"物品名称", "类型", "数量", "日期"}
+                    required_cols = {"物品名称", "类别", "类型", "数量", "日期"}
                     missing = required_cols - set(df_import.columns)
                     if missing: st.error(f"缺少必需的列：{', '.join(missing)}。请下载模板并按格式填写。")
                     elif df_import.empty: st.warning("文件中没有数据行。")
