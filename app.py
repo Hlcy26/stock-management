@@ -154,7 +154,7 @@ def update_user_profile(email, name, student_id):
     conn.close()
 
 def transfer_admin(from_email, to_email):
-    """普通 Admin 转让权限（永久 Admin 不能使用此功能）"""
+    """普通 Admin 转让权限"""
     if from_email == to_email:
         return False, "不能转让给自己"
     conn = get_conn()
@@ -216,7 +216,7 @@ def set_permanent_admin(target_email, is_permanent):
         conn.close()
 
 def set_normal_admin(target_email):
-    """永久 Admin 设置某个用户为普通 Admin（普通 Admin 唯一，原有的会被降级）"""
+    """永久 Admin 设置普通 Admin（普通 Admin 唯一，原有的会被降级）"""
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -265,10 +265,11 @@ def delete_user(email):
     conn.close()
 
 def list_users(keyword=""):
+    """查询用户列表（注意：PostgreSQL 保留大写列名需要加双引号）"""
     conn = get_conn()
-    sql = ("SELECT email AS 邮箱, name AS 姓名, student_id AS 学号, role AS 角色, "
-           "is_permanent_admin AS 永久Admin, password_change_count AS 已修改次数, "
-           "created_at AS 创建时间 FROM app_users")
+    sql = ('SELECT email AS 邮箱, name AS 姓名, student_id AS 学号, role AS 角色, '
+           'is_permanent_admin AS "永久Admin", password_change_count AS 已修改次数, '
+           'created_at AS 创建时间 FROM app_users')
     params = []
     if keyword and keyword.strip():
         sql += " WHERE name ILIKE %s OR student_id ILIKE %s OR email ILIKE %s "
@@ -839,7 +840,6 @@ if "👥 用户管理" in tab_dict:
         cur.close(); conn.close()
         i_am_permanent = _op_row[0] if _op_row else False
 
-        # 搜索 + 用户列表
         st.markdown("##### 🔎 搜索用户")
         search_kw = st.text_input("按 姓名 / 学号 / 邮箱 搜索", "", key="user_search", placeholder="输入姓名、学号或邮箱的一部分即可")
         users_df = list_users(search_kw)
@@ -847,7 +847,6 @@ if "👥 用户管理" in tab_dict:
         if users_df.empty: st.info("没有匹配的用户。")
         else: st.dataframe(users_df, use_container_width=True, hide_index=True); st.caption(f"共 {len(users_df)} 位用户")
 
-        # 添加新用户
         st.divider()
         st.markdown("##### ➕ 添加新用户")
         st.caption("新增用户默认是 Operator，初始密码统一为 123456。")
@@ -867,16 +866,13 @@ if "👥 用户管理" in tab_dict:
                     if ok: st.success(f"已添加：{new_name}（{new_student_id}）- {new_email}。{msg}"); st.rerun()
                     else: st.error(msg)
 
-        # 永久 Admin 专属：设置/取消永久 Admin
         if i_am_permanent:
             st.divider()
             st.markdown("##### ⭐ 设置 / 取消永久 Admin")
             st.caption("永久 Admin 拥有全部权限，且不会被降级。可以指定多个永久 Admin。")
-
             perm_search = st.text_input("搜索目标用户（姓名 / 学号 / 邮箱）", "", key="perm_search", placeholder="输入关键词筛选")
             candidates_df = list_users(perm_search) if perm_search.strip() else list_users("")
             candidates_df = candidates_df[candidates_df["邮箱"] != st.session_state.user]
-
             if candidates_df.empty:
                 st.info("没有可选用户。")
             else:
@@ -885,7 +881,6 @@ if "👥 用户管理" in tab_dict:
                 target_row = candidates_df.iloc[display_list.index(selected_display)]
                 target_email = target_row["邮箱"]
                 is_perm_now = target_row["永久Admin"]
-
                 col1, col2 = st.columns(2)
                 with col1:
                     if not is_perm_now:
@@ -902,28 +897,23 @@ if "👥 用户管理" in tab_dict:
                             if ok: st.success(msg); st.rerun()
                             else: st.error(msg)
 
-        # 永久 Admin 专属：设置普通 Admin
         if i_am_permanent:
             st.divider()
             st.markdown("##### 👤 设置普通 Admin")
             st.caption("普通 Admin 在整个系统中**只能有一个**。如果指定新的人选，原来的普通 Admin 会自动降级为 Operator。永久 Admin 不受影响。")
-
             conn = get_conn(); cur = conn.cursor()
             cur.execute("SELECT email, name FROM app_users WHERE role = 'admin' AND is_permanent_admin = FALSE LIMIT 1")
             current_normal_admin = cur.fetchone()
             cur.close(); conn.close()
-
             if current_normal_admin:
                 st.info(f"当前普通 Admin：{current_normal_admin[1] or '未填姓名'}（{current_normal_admin[0]}）")
             else:
                 st.warning("当前系统还没有普通 Admin。")
-
             na_search = st.text_input("搜索目标用户（姓名 / 学号 / 邮箱）", "", key="na_search", placeholder="输入关键词筛选")
             candidates_na = list_users(na_search) if na_search.strip() else list_users("")
             candidates_na = candidates_na[(candidates_na["永久Admin"] == False)]
             if current_normal_admin:
                 candidates_na = candidates_na[candidates_na["邮箱"] != current_normal_admin[0]]
-
             if candidates_na.empty:
                 st.info("没有可选用户。")
             else:
@@ -935,7 +925,6 @@ if "👥 用户管理" in tab_dict:
                     if ok: st.success(msg); st.rerun()
                     else: st.error(msg)
 
-        # 转让普通 Admin 权限
         st.divider()
         st.markdown("##### 🔁 转让普通 Admin 权限")
         st.caption("此项仅对**普通 Admin** 有效。转让后您将降为 Operator。永久 Admin 无需使用此功能。")
@@ -963,7 +952,6 @@ if "👥 用户管理" in tab_dict:
                         if ok: st.success(msg); st.session_state.role = "operator"; st.rerun()
                         else: st.error(msg)
 
-        # 重置密码 / 删除用户
         st.divider()
         st.markdown("##### 🔧 重置密码 / 删除用户")
         if users_df.empty: st.info("请先在搜索框里找到目标用户。")
@@ -973,7 +961,6 @@ if "👥 用户管理" in tab_dict:
             target_email = users_df.iloc[display_list2.index(selected_user_display)]["邮箱"]
             target_role = users_df.iloc[display_list2.index(selected_user_display)]["角色"]
             target_is_perm = users_df.iloc[display_list2.index(selected_user_display)]["永久Admin"]
-
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("重置密码为 123456"):
