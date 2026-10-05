@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 团委学生会物资管理系统（Streamlit Cloud + Supabase 完整版）
+功能：出入库、批量导入、库存查询、学期查询、预警、导出、邮箱/学号登录、
+      Operator / 普通Admin / 永久Admin 三级权限、密码修改2次限制
+数量统一为整数，不支持小数。
 """
 
 import io
@@ -313,7 +316,6 @@ def _parse_datetime(row):
     if d is None or pd.isna(d):
         raise ValueError("日期不能为空")
     d_str = pd.to_datetime(d).strftime("%Y-%m-%d")
-    # Excel 模板已无"时间"列，若仍存在则解析；否则默认为 00:00:00
     t = row.get("时间", None)
     if t is None or pd.isna(t) or str(t).strip() == "":
         t_str = "00:00:00"
@@ -340,9 +342,22 @@ def import_logs_from_excel(df, default_operator):
             if category not in CATEGORIES: category = "其他"
             ctype_cn = str(row.get("类型", "")).strip()
             if ctype_cn not in ("入库", "出库"): errors.append(f"第 {row_num} 行：类型必须是「入库」或「出库」"); continue
-            try: qty = float(row.get("数量"))
-            except (TypeError, ValueError): errors.append(f"第 {row_num} 行：数量不是有效数字"); continue
-            if qty <= 0: errors.append(f"第 {row_num} 行：数量必须大于 0"); continue
+            # 数量校验：必须是正整数
+            try:
+                qty_val = row.get("数量")
+                if pd.isna(qty_val):
+                    raise ValueError
+                qty = float(qty_val)
+                if qty != int(qty):
+                    errors.append(f"第 {row_num} 行：数量必须是整数")
+                    continue
+                qty = int(qty)
+            except (TypeError, ValueError):
+                errors.append(f"第 {row_num} 行：数量不是有效数字")
+                continue
+            if qty <= 0:
+                errors.append(f"第 {row_num} 行：数量必须大于 0")
+                continue
             try: log_time = _parse_datetime(row)
             except Exception as e: errors.append(f"第 {row_num} 行：{e}"); continue
             operator_val = str(row.get("操作人", "")).strip() or default_operator
@@ -517,23 +532,17 @@ def generate_import_template():
         template_df.to_excel(writer, sheet_name="出入库导入", index=False)
         wb = writer.book
         ws = writer.sheets["出入库导入"]
-        # 类别列（B 列）下拉
         dv_category = DataValidation(
-            type="list",
-            formula1=f'"{",".join(CATEGORIES)}"',
-            allow_blank=True,
-            showDropDown=False,   # False 表示显示下拉箭头
+            type="list", formula1=f'"{",".join(CATEGORIES)}"',
+            allow_blank=True, showDropDown=False,
         )
         dv_category.error = "请从下拉列表中选择类别"
         dv_category.errorTitle = "类别无效"
         ws.add_data_validation(dv_category)
         dv_category.add("B2:B1000")
-        # 类型列（C 列）下拉
         dv_type = DataValidation(
-            type="list",
-            formula1='"入库,出库"',
-            allow_blank=False,
-            showDropDown=False,
+            type="list", formula1='"入库,出库"',
+            allow_blank=False, showDropDown=False,
         )
         dv_type.error = "类型只能填「入库」或「出库」"
         dv_type.errorTitle = "类型无效"
@@ -661,7 +670,7 @@ if "📝 录入出入库" in tab_dict:
                     category = st.selectbox("类别 *", CATEGORIES)
                 with col2:
                     change_type_cn = st.selectbox("类型 *", ["入库", "出库"])
-                    quantity = st.number_input("数量 *", min_value=0.01, step=1.0, format="%.2f")
+                    quantity = st.number_input("数量 *", min_value=1, step=1, value=1, format="%d")
                 col3, col4, col5 = st.columns(3)
                 with col3: log_date = st.date_input("日期 *", value=date.today())
                 with col4: operator = st.text_input("操作人 *", value=st.session_state.name or "")
@@ -673,7 +682,6 @@ if "📝 录入出入库" in tab_dict:
                     if errors:
                         for e in errors: st.error(e)
                     else:
-                        # 时间统一记为 00:00:00
                         log_time = f"{log_date.strftime('%Y-%m-%d')} 00:00:00"
                         change_type = "IN" if change_type_cn == "入库" else "OUT"
                         clean_name = str(item_name).strip(); clean_operator = operator.strip()
@@ -692,7 +700,8 @@ if "📝 录入出入库" in tab_dict:
             1. 点击下方按钮下载 Excel 模板
             2. 按模板格式填写（**物品名称、类别、类型、数量、日期**为必填）
             3. **类别**和**类型**列点击单元格会出现下拉箭头，直接从列表中选择即可
-            4. 上传填好的 Excel 文件，确认导入
+            4. **数量**列请填写整数（不支持小数）
+            5. 上传填好的 Excel 文件，确认导入
             """)
             col1, col2 = st.columns(2)
             with col1: st.download_button("⬇️ 下载 Excel 模板", generate_import_template(), file_name="出入库导入模板.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -810,7 +819,7 @@ if "🔔 预警设置" in tab_dict:
         with col2:
             if alert_mode == "从已有物品选择" and items: alert_item = st.selectbox("选择物品", items)
             else: alert_item = st.text_input("物品名称")
-        alert_qty = st.number_input("最低库存阈值", min_value=0.0, step=1.0, format="%.2f")
+        alert_qty = st.number_input("最低库存阈值", min_value=0, step=1, value=0, format="%d")
         if st.button("💾 保存预警", type="primary"):
             if not alert_item or not alert_item.strip(): st.error("请先选择或输入物品名称")
             else: set_alert(alert_item.strip(), alert_qty); st.success(f"已设置：【{alert_item}】最低库存 {alert_qty}"); st.rerun()
