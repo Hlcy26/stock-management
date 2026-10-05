@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-团委学生会物资管理系统（Streamlit Cloud + Supabase）
-含：永久 Admin 权限、密码修改2次限制、双角色体系
+团委学生会物资管理系统（Streamlit Cloud + Supabase 完整版）
+功能：出入库、批量导入、库存查询、学期查询、预警、导出、邮箱/学号登录、
+      Operator / 普通Admin / 永久Admin 三级权限、密码修改2次限制
 """
 
 import io
@@ -96,9 +97,7 @@ def init_db():
             (default_email, bcrypt.hash(default_password), "admin", 0, True)
         )
 
-    # 角色规范化：editor/viewer -> operator
     cur.execute("UPDATE app_users SET role = 'operator' WHERE role IN ('editor', 'viewer')")
-    # 保证"普通 Admin"只有一个（永久 Admin 不算在内）
     cur.execute("SELECT email FROM app_users WHERE role = 'admin' AND is_permanent_admin = FALSE ORDER BY created_at")
     normal_admins = cur.fetchall()
     if len(normal_admins) > 1:
@@ -155,7 +154,7 @@ def update_user_profile(email, name, student_id):
     conn.close()
 
 def transfer_admin(from_email, to_email):
-    """普通 Admin 转让自己的权限给目标用户（转让后自己降为 Operator）"""
+    """普通 Admin 转让权限（永久 Admin 不能使用此功能）"""
     if from_email == to_email:
         return False, "不能转让给自己"
     conn = get_conn()
@@ -165,10 +164,10 @@ def transfer_admin(from_email, to_email):
         from_row = cur.fetchone()
         if not from_row:
             return False, "系统错误：找不到您的账号"
-        if from_row[1]:  # is_permanent_admin
-            return False, "您是永久 Admin，不能通过此方式转让。如需变更，请使用「设置永久 Admin」功能。"
+        if from_row[1]:
+            return False, "您是永久 Admin，不能通过此方式转让。"
 
-        cur.execute("SELECT role, is_permanent_admin FROM app_users WHERE email = %s", (to_email,))
+        cur.execute("SELECT role FROM app_users WHERE email = %s", (to_email,))
         row = cur.fetchone()
         if not row:
             return False, "目标用户不存在"
@@ -187,7 +186,7 @@ def transfer_admin(from_email, to_email):
         conn.close()
 
 def set_permanent_admin(target_email, is_permanent):
-    """设置/取消某用户的永久 Admin（仅永久 Admin 可操作）"""
+    """永久 Admin 设置/取消某用户的永久 Admin 权限"""
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -209,6 +208,36 @@ def set_permanent_admin(target_email, is_permanent):
             msg = f"✅ 已取消 {target_email} 的永久 Admin 标记"
         conn.commit()
         return True, msg
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        cur.close()
+        conn.close()
+
+def set_normal_admin(target_email):
+    """永久 Admin 设置某个用户为普通 Admin（普通 Admin 唯一，原有的会被降级）"""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT is_permanent_admin FROM app_users WHERE email = %s", (st.session_state.user,))
+        op_row = cur.fetchone()
+        if not op_row or not op_row[0]:
+            return False, "只有永久 Admin 可以执行此操作"
+
+        cur.execute("SELECT role, is_permanent_admin FROM app_users WHERE email = %s", (target_email,))
+        target_row = cur.fetchone()
+        if not target_row:
+            return False, "目标用户不存在"
+        if target_row[1]:
+            return False, "目标用户已是永久 Admin，无需再设为普通 Admin"
+        if target_row[0] == "admin" and not target_row[1]:
+            return False, "目标用户已是普通 Admin"
+
+        cur.execute("UPDATE app_users SET role = 'operator' WHERE role = 'admin' AND is_permanent_admin = FALSE")
+        cur.execute("UPDATE app_users SET role = 'admin', is_permanent_admin = FALSE WHERE email = %s", (target_email,))
+        conn.commit()
+        return True, f"✅ 已将 {target_email} 设为普通 Admin（原普通 Admin 已自动降级为 Operator）"
     except Exception as e:
         conn.rollback()
         return False, str(e)
@@ -802,15 +831,15 @@ if "📤 导出数据" in tab_dict:
 if "👥 用户管理" in tab_dict:
     with tab_dict["👥 用户管理"]:
         st.subheader("👥 用户管理")
-        st.caption("系统有三种角色：**Operator**（录入、查询、导出）、**Admin**（普通管理员，唯一）、**永久 Admin**（可以多个，权限最高，不会被降级）。")
+        st.caption("三种角色：**Operator**（录入、查询、导出）、**普通 Admin**（唯一，可转让）、**永久 Admin**（可多个，不被降级）。")
 
-        # 检查当前用户是否为永久 admin
         conn = get_conn(); cur = conn.cursor()
         cur.execute("SELECT is_permanent_admin FROM app_users WHERE email = %s", (st.session_state.user,))
         _op_row = cur.fetchone()
         cur.close(); conn.close()
         i_am_permanent = _op_row[0] if _op_row else False
 
+        # 搜索 + 用户列表
         st.markdown("##### 🔎 搜索用户")
         search_kw = st.text_input("按 姓名 / 学号 / 邮箱 搜索", "", key="user_search", placeholder="输入姓名、学号或邮箱的一部分即可")
         users_df = list_users(search_kw)
@@ -818,6 +847,7 @@ if "👥 用户管理" in tab_dict:
         if users_df.empty: st.info("没有匹配的用户。")
         else: st.dataframe(users_df, use_container_width=True, hide_index=True); st.caption(f"共 {len(users_df)} 位用户")
 
+        # 添加新用户
         st.divider()
         st.markdown("##### ➕ 添加新用户")
         st.caption("新增用户默认是 Operator，初始密码统一为 123456。")
@@ -837,15 +867,14 @@ if "👥 用户管理" in tab_dict:
                     if ok: st.success(f"已添加：{new_name}（{new_student_id}）- {new_email}。{msg}"); st.rerun()
                     else: st.error(msg)
 
-        # 永久 Admin 专属功能
+        # 永久 Admin 专属：设置/取消永久 Admin
         if i_am_permanent:
             st.divider()
             st.markdown("##### ⭐ 设置 / 取消永久 Admin")
-            st.caption("永久 Admin 拥有全部权限，且不会被降级。你可以指定多个永久 Admin。")
+            st.caption("永久 Admin 拥有全部权限，且不会被降级。可以指定多个永久 Admin。")
 
             perm_search = st.text_input("搜索目标用户（姓名 / 学号 / 邮箱）", "", key="perm_search", placeholder="输入关键词筛选")
             candidates_df = list_users(perm_search) if perm_search.strip() else list_users("")
-            # 排除自己
             candidates_df = candidates_df[candidates_df["邮箱"] != st.session_state.user]
 
             if candidates_df.empty:
@@ -873,9 +902,43 @@ if "👥 用户管理" in tab_dict:
                             if ok: st.success(msg); st.rerun()
                             else: st.error(msg)
 
+        # 永久 Admin 专属：设置普通 Admin
+        if i_am_permanent:
+            st.divider()
+            st.markdown("##### 👤 设置普通 Admin")
+            st.caption("普通 Admin 在整个系统中**只能有一个**。如果指定新的人选，原来的普通 Admin 会自动降级为 Operator。永久 Admin 不受影响。")
+
+            conn = get_conn(); cur = conn.cursor()
+            cur.execute("SELECT email, name FROM app_users WHERE role = 'admin' AND is_permanent_admin = FALSE LIMIT 1")
+            current_normal_admin = cur.fetchone()
+            cur.close(); conn.close()
+
+            if current_normal_admin:
+                st.info(f"当前普通 Admin：{current_normal_admin[1] or '未填姓名'}（{current_normal_admin[0]}）")
+            else:
+                st.warning("当前系统还没有普通 Admin。")
+
+            na_search = st.text_input("搜索目标用户（姓名 / 学号 / 邮箱）", "", key="na_search", placeholder="输入关键词筛选")
+            candidates_na = list_users(na_search) if na_search.strip() else list_users("")
+            candidates_na = candidates_na[(candidates_na["永久Admin"] == False)]
+            if current_normal_admin:
+                candidates_na = candidates_na[candidates_na["邮箱"] != current_normal_admin[0]]
+
+            if candidates_na.empty:
+                st.info("没有可选用户。")
+            else:
+                display_na = [f"{r['姓名'] or '未填'}（{r['学号'] or '未填'}）- {r['邮箱']}" for _, r in candidates_na.iterrows()]
+                selected_na = st.selectbox("选择用户", display_na, key="na_target")
+                target_email_na = candidates_na.iloc[display_na.index(selected_na)]["邮箱"]
+                if st.button("👤 设为普通 Admin", type="primary"):
+                    ok, msg = set_normal_admin(target_email_na)
+                    if ok: st.success(msg); st.rerun()
+                    else: st.error(msg)
+
+        # 转让普通 Admin 权限
         st.divider()
         st.markdown("##### 🔁 转让普通 Admin 权限")
-        st.caption("此项仅对**普通 Admin**有效。转让后您将降为 Operator。永久 Admin 无需使用此功能。")
+        st.caption("此项仅对**普通 Admin** 有效。转让后您将降为 Operator。永久 Admin 无需使用此功能。")
         if i_am_permanent:
             st.info("您是永久 Admin，无需转让权限。")
         else:
@@ -900,6 +963,7 @@ if "👥 用户管理" in tab_dict:
                         if ok: st.success(msg); st.session_state.role = "operator"; st.rerun()
                         else: st.error(msg)
 
+        # 重置密码 / 删除用户
         st.divider()
         st.markdown("##### 🔧 重置密码 / 删除用户")
         if users_df.empty: st.info("请先在搜索框里找到目标用户。")
