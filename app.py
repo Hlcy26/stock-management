@@ -300,18 +300,20 @@ def render_user_table(df):
     for _, row in df.iterrows():
         is_perm = bool(row["永久Admin"])
         role = row["角色"]
-        if is_perm or role == "admin":
+        if is_perm:
             role_text = "Admin"
             role_style = "color:#DAA520; font-weight:bold;"
+        elif role == "admin":
+            role_text = "Admin"
+            role_style = "color:white;"
         else:
             role_text = "Operator"
-            role_style = ""
-        row_style = "background-color:#FFF8DC;" if is_perm else ""
+            role_style = "color:white;"
         email_v = row["邮箱"] or ""
         name_v = row["姓名"] or ""
         sid_v = row["学号"] or ""
         ctime_v = str(row["创建时间"]) if row["创建时间"] is not None else ""
-        html += f'<tr style="{row_style}">'
+        html += '<tr style="background-color:#262730; color:white;">'
         html += f'<td style="padding:8px; border:1px solid #ddd;">{email_v}</td>'
         html += f'<td style="padding:8px; border:1px solid #ddd;">{name_v}</td>'
         html += f'<td style="padding:8px; border:1px solid #ddd;">{sid_v}</td>'
@@ -711,92 +713,24 @@ if "user" not in st.session_state:
 if st.session_state.user is None:
     st.title("📦 团委学生会物资管理系统")
 
-    auth_tab1, auth_tab2 = st.tabs(["🔐 登录", "🔑 更改密码"])
-
-    with auth_tab1:
-        st.subheader("请登录")
-        st.markdown(render_contact_html(), unsafe_allow_html=True)
-        with st.form("login_form"):
-            identifier = st.text_input("邮箱或学号")
-            password = st.text_input("密码", type="password")
-            if st.form_submit_button("登录", type="primary"):
-                if not identifier or not password:
-                    st.error("请填写账号和密码")
+    st.subheader("请登录")
+    st.markdown(render_contact_html(), unsafe_allow_html=True)
+    with st.form("login_form"):
+        identifier = st.text_input("邮箱或学号")
+        password = st.text_input("密码", type="password")
+        if st.form_submit_button("登录", type="primary"):
+            if not identifier or not password:
+                st.error("请填写账号和密码")
+            else:
+                user = get_user(identifier.strip())
+                if user and bcrypt.verify(password, user[1]):
+                    st.session_state.user = user[0]
+                    st.session_state.role = user[2]
+                    st.session_state.name = user[3]
+                    st.session_state.student_id = user[4]
+                    st.rerun()
                 else:
-                    user = get_user(identifier.strip())
-                    if user and bcrypt.verify(password, user[1]):
-                        st.session_state.user = user[0]
-                        st.session_state.role = user[2]
-                        st.session_state.name = user[3]
-                        st.session_state.student_id = user[4]
-                        st.rerun()
-                    else:
-                        st.error("账号或密码错误")
-
-    with auth_tab2:
-        st.subheader("🔑 更改密码")
-        st.markdown(render_forgot_password_html(), unsafe_allow_html=True)
-
-        with st.form("change_pwd_guest_form"):
-            st.markdown("##### 1. 身份信息")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                cp_name = st.text_input("姓名 *")
-            with col2:
-                cp_student_id = st.text_input("学号 *")
-            with col3:
-                cp_email = st.text_input("邮箱 *")
-
-            st.markdown("##### 2. 密码")
-            col4, col5, col6 = st.columns(3)
-            with col4:
-                cp_old_pwd = st.text_input("旧密码 *", type="password")
-            with col5:
-                cp_new_pwd = st.text_input("新密码 *", type="password")
-            with col6:
-                cp_confirm_pwd = st.text_input("确认新密码 *", type="password")
-
-            submitted = st.form_submit_button("确认修改", type="primary")
-
-            if submitted:
-                errors = []
-                if not all([cp_name.strip(), cp_student_id.strip(), cp_email.strip(), cp_old_pwd, cp_new_pwd, cp_confirm_pwd]):
-                    errors.append("所有字段都必须填写")
-                elif cp_new_pwd != cp_confirm_pwd:
-                    errors.append("两次输入的新密码不一致")
-                elif len(cp_new_pwd) < 6:
-                    errors.append("新密码长度不能少于 6 位")
-
-                if errors:
-                    for e in errors:
-                        st.error(e)
-                else:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT email, name, student_id, password_hash FROM app_users WHERE email = %s", (cp_email.strip(),))
-                    row = cur.fetchone()
-                    cur.close()
-                    conn.close()
-
-                    if not row:
-                        st.error("❌ 该邮箱不存在，请检查输入")
-                    else:
-                        db_email, db_name, db_student_id, db_password_hash = row
-                        if cp_name.strip() != db_name:
-                            st.error("❌ 姓名与系统记录不匹配")
-                        elif cp_student_id.strip() != db_student_id:
-                            st.error("❌ 学号与系统记录不匹配")
-                        elif not bcrypt.verify(cp_old_pwd, db_password_hash):
-                            st.error("❌ 旧密码错误")
-                        else:
-                            conn = get_conn()
-                            cur = conn.cursor()
-                            cur.execute("UPDATE app_users SET password_hash = %s WHERE email = %s",
-                                        (bcrypt.hash(cp_new_pwd), db_email))
-                            conn.commit()
-                            cur.close()
-                            conn.close()
-                            st.success("✅ 密码修改成功！请切换到「登录」标签登录。")
+                    st.error("账号或密码错误")
 
     st.stop()
 
