@@ -378,56 +378,124 @@ def get_stock(item_name):
     return row[0] if row else 0
 
 
-def import_logs_from_excel(df, fixed_operator, fixed_date):
+def _setup_template_sheet(ws):
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    header_fill = PatternFill("solid", fgColor="4A6FA5")
+    sub_font = Font(bold=True)
+    sub_fill = PatternFill("solid", fgColor="D9E1F2")
+    center = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color="B0B0B0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for idx, cat in enumerate(CATEGORIES):
+        col_start = idx * 3 + 1
+        cell = ws.cell(row=1, column=col_start, value=cat)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+        cell.border = border
+        ws.merge_cells(start_row=1, start_column=col_start, end_row=1, end_column=col_start + 2)
+        for c in range(col_start, col_start + 3):
+            ws.cell(row=1, column=c).border = border
+        for j, h in enumerate(["物品名称", "数量", "备注"]):
+            c = ws.cell(row=2, column=col_start + j, value=h)
+            c.font = sub_font
+            c.fill = sub_fill
+            c.alignment = center
+            c.border = border
+        ws.column_dimensions[get_column_letter(col_start)].width = 18
+        ws.column_dimensions[get_column_letter(col_start + 1)].width = 8
+        ws.column_dimensions[get_column_letter(col_start + 2)].width = 16
+    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[2].height = 18
+
+
+def generate_import_template():
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "入库"
+    _setup_template_sheet(ws1)
+    ws2 = wb.create_sheet("出库")
+    _setup_template_sheet(ws2)
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+def parse_excel_import(file_bytes):
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        return [], [f"无法读取 Excel：{e}"]
+
+    rows = []
+    errors = []
+    sheet_map = {"入库": "IN", "出库": "OUT"}
+
+    for sheet_name, change_type in sheet_map.items():
+        if sheet_name not in wb.sheetnames:
+            errors.append(f"缺少 Sheet：{sheet_name}")
+            continue
+        ws = wb[sheet_name]
+        for idx, cat in enumerate(CATEGORIES):
+            col_item = idx * 3 + 1
+            col_qty = idx * 3 + 2
+            col_note = idx * 3 + 3
+            for r in range(3, ws.max_row + 1):
+                item_cell = ws.cell(row=r, column=col_item).value
+                if item_cell is None or str(item_cell).strip() == "":
+                    continue
+                item = str(item_cell).strip()
+                qty_cell = ws.cell(row=r, column=col_qty).value
+                note_cell = ws.cell(row=r, column=col_note).value
+                try:
+                    qty = int(float(qty_cell)) if qty_cell is not None else None
+                except (TypeError, ValueError):
+                    qty = None
+                if qty is None or qty <= 0:
+                    errors.append(f"[{sheet_name}] {cat} 第 {r} 行「{item}」：数量无效")
+                    continue
+                note_val = "" if note_cell is None else str(note_cell).strip()
+                rows.append({
+                    "sheet": sheet_name,
+                    "change_type": change_type,
+                    "category": cat,
+                    "item_name": item,
+                    "quantity": qty,
+                    "note": note_val,
+                })
+    return rows, errors
+
+
+def import_logs_from_parsed(rows, fixed_operator, fixed_date):
     success = 0
     errors = []
     conn = get_conn()
     cur = conn.cursor()
-    for idx, row in df.iterrows():
-        row_num = idx + 2
+    for r in rows:
         try:
-            item = str(row.get("物品名称", "")).strip()
-            if not item:
-                errors.append(f"第 {row_num} 行：物品名称为空")
-                continue
-            category = str(row.get("类别", "")).strip() or "其他"
-            if category not in CATEGORIES:
-                category = "其他"
-            ctype_cn = str(row.get("类型", "")).strip()
-            if ctype_cn not in ("入库", "出库"):
-                errors.append(f"第 {row_num} 行：类型必须是「入库」或「出库」")
-                continue
-            try:
-                qty_val = row.get("数量")
-                if pd.isna(qty_val):
-                    raise ValueError
-                qty = float(qty_val)
-                if qty != int(qty):
-                    errors.append(f"第 {row_num} 行：数量必须是整数")
-                    continue
-                qty = int(qty)
-            except (TypeError, ValueError):
-                errors.append(f"第 {row_num} 行：数量不是有效数字")
-                continue
-            if qty <= 0:
-                errors.append(f"第 {row_num} 行：数量必须大于 0")
-                continue
-            note_val = row.get("备注", "")
-            note_val = "" if (note_val is None or pd.isna(note_val)) else str(note_val).strip()
-            change_type = "IN" if ctype_cn == "入库" else "OUT"
+            item = r["item_name"]
+            cat = r["category"]
+            qty = r["quantity"]
+            note_val = r["note"]
+            change_type = r["change_type"]
             log_time = f"{fixed_date} 00:00:00"
-            operator_val = fixed_operator
             if change_type == "OUT":
                 cur.execute("SELECT COALESCE(SUM(CASE WHEN change_type='IN' THEN quantity ELSE -quantity END), 0) FROM stock_log WHERE item_name = %s", (item,))
                 stock = cur.fetchone()[0]
                 if stock < qty:
-                    errors.append(f"第 {row_num} 行：{item} 库存不足（当前 {stock}，需出库 {qty}）")
+                    errors.append(f"{item} 库存不足，请确认后再输入！")
                     continue
             cur.execute("INSERT INTO stock_log(item_name, category, change_type, quantity, log_time, note, operator) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                        (item, category, change_type, qty, log_time, note_val, operator_val))
+                        (item, cat, change_type, qty, log_time, note_val, fixed_operator))
             success += 1
         except Exception as e:
-            errors.append(f"第 {row_num} 行：{e}")
+            errors.append(f"[{r['sheet']}] {r['category']}「{r['item_name']}」：{e}")
     conn.commit()
     cur.close()
     conn.close()
@@ -594,32 +662,6 @@ def _prepare_stock_df(keyword="", category="全部"):
     if df.empty:
         return df
     return df[["物品名称", "类别", "累计入库", "累计出库", "当前库存", "预警阈值", "状态"]]
-
-
-def generate_import_template():
-    template_df = pd.DataFrame({
-        "物品名称": ["示例：中性笔", "示例：A4纸"],
-        "类别": ["办公用品", "办公用品"],
-        "类型": ["入库", "出库"],
-        "数量": [20, 5],
-        "备注": ["示例行，可删除", "示例行，可删除"],
-    })
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        template_df.to_excel(writer, sheet_name="出入库导入", index=False)
-        wb = writer.book
-        ws = writer.sheets["出入库导入"]
-        dv_category = DataValidation(type="list", formula1=f'"{",".join(CATEGORIES)}"', allow_blank=True, showDropDown=False)
-        dv_category.error = "请从下拉列表中选择类别"
-        dv_category.errorTitle = "类别无效"
-        ws.add_data_validation(dv_category)
-        dv_category.add("B2:B1000")
-        dv_type = DataValidation(type="list", formula1='"入库,出库"', allow_blank=False, showDropDown=False)
-        dv_type.error = "类型只能填「入库」或「出库」"
-        dv_type.errorTitle = "类型无效"
-        ws.add_data_validation(dv_type)
-        dv_type.add("C2:C1000")
-    return output.getvalue()
 
 
 def _register_chinese_font():
@@ -835,7 +877,7 @@ if "📝 录入出入库" in tab_dict:
                         if change_type == "OUT":
                             stock = get_stock(clean_name)
                             if stock < quantity:
-                                st.error(f"库存不足！【{clean_name}】当前库存：{stock}")
+                                st.error(f"{clean_name} 库存不足，请确认后再输入！")
                             else:
                                 insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
                                 st.success(f"✅ 已录入出库：{clean_name} × {quantity}（{single_final_date}）")
@@ -846,10 +888,11 @@ if "📝 录入出入库" in tab_dict:
             st.markdown("##### 📋 使用说明")
             st.markdown("""
             1. 点击下方按钮下载 Excel 模板
-            2. 按模板格式填写（**物品名称、类别、类型、数量**为必填）
-            3. **类别**和**类型**列点击单元格会出现下拉箭头，直接从列表中选择即可
-            4. **数量**列请填写整数（不支持小数）
-            5. 上传填好的 Excel 文件，确认导入
+            2. 模板有两个 Sheet：**入库** 和 **出库**
+            3. 每个 Sheet 中，各类别按列分开（办公用品 / 活动物资 / 宣传用品 / 奖品/证书 / 借用物资 / 其他）
+            4. 每个类别下有三列：**物品名称**、**数量**、**备注**
+            5. 从第 3 行开始填写数据，数量填写正整数
+            6. 上传填好的 Excel 文件，确认导入
             """)
 
             col_d1, col_d2 = st.columns([1, 2])
@@ -872,31 +915,43 @@ if "📝 录入出入库" in tab_dict:
             uploaded_file = st.file_uploader("上传填好的 Excel 文件（.xlsx）", type=["xlsx"], key="import_file")
             if uploaded_file is not None:
                 try:
-                    df_import = pd.read_excel(uploaded_file, sheet_name=0)
-                    df_import.columns = [str(c).strip() for c in df_import.columns]
-                    required_cols = {"物品名称", "类别", "类型", "数量"}
-                    missing = required_cols - set(df_import.columns)
-                    if missing:
-                        st.error(f"缺少必需的列：{', '.join(missing)}。请下载模板并按格式填写。")
-                    elif df_import.empty:
-                        st.warning("文件中没有数据行。")
+                    file_bytes = uploaded_file.read()
+                    rows, parse_errors = parse_excel_import(file_bytes)
+
+                    if parse_errors:
+                        with st.expander(f"⚠️ 解析过程中发现 {len(parse_errors)} 个问题", expanded=True):
+                            for e in parse_errors:
+                                st.write(f"- {e}")
+
+                    if not rows:
+                        st.warning("文件中没有可导入的数据行。")
                     else:
                         st.markdown("##### 📄 数据预览")
-                        st.dataframe(df_import, use_container_width=True, hide_index=True)
-                        st.caption(f"共 {len(df_import)} 行待导入")
+                        preview_df = pd.DataFrame([
+                            {
+                                "Sheet": r["sheet"],
+                                "类别": r["category"],
+                                "物品名称": r["item_name"],
+                                "数量": r["quantity"],
+                                "备注": r["note"],
+                            } for r in rows
+                        ])
+                        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                        st.caption(f"共 {len(rows)} 条待导入")
+
                         if st.button("✅ 确认导入", type="primary", key="btn_import"):
                             with st.spinner("导入中..."):
-                                success, errors = import_logs_from_excel(df_import, st.session_state.name, final_date)
+                                success, errors = import_logs_from_parsed(rows, st.session_state.name, final_date)
                             if success > 0:
                                 st.success(f"✅ 成功导入 {success} 条记录（操作人：{st.session_state.name}，日期：{final_date}）")
                             if errors:
-                                with st.expander(f"⚠️ 有 {len(errors)} 行未导入，点击查看原因"):
+                                with st.expander(f"⚠️ 有 {len(errors)} 条未导入，点击查看原因"):
                                     for e in errors:
                                         st.write(f"- {e}")
                             if success > 0 and not errors:
                                 st.balloons()
                 except Exception as e:
-                    st.error(f"读取文件失败：{e}")
+                    st.error(f"处理文件失败：{e}")
 
 
 if "🔍 查询与导出" in tab_dict:
