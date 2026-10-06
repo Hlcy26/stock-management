@@ -179,34 +179,6 @@ def transfer_admin(from_email, to_email):
         conn.close()
 
 
-def set_permanent_admin(target_email, is_permanent):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT is_permanent_admin FROM app_users WHERE email = %s", (st.session_state.user,))
-        op_row = cur.fetchone()
-        if not op_row or not op_row[0]:
-            return False, "只有永久 Admin 可以执行此操作"
-        cur.execute("SELECT role FROM app_users WHERE email = %s", (target_email,))
-        row = cur.fetchone()
-        if not row:
-            return False, "目标用户不存在"
-        if is_permanent:
-            cur.execute("UPDATE app_users SET role = 'admin', is_permanent_admin = TRUE WHERE email = %s", (target_email,))
-            msg = f"✅ 已将 {target_email} 设为永久 Admin"
-        else:
-            cur.execute("UPDATE app_users SET is_permanent_admin = FALSE WHERE email = %s", (target_email,))
-            msg = f"✅ 已取消 {target_email} 的永久 Admin 标记"
-        conn.commit()
-        return True, msg
-    except Exception as e:
-        conn.rollback()
-        return False, str(e)
-    finally:
-        cur.close()
-        conn.close()
-
-
 def set_normal_admin(target_email):
     conn = get_conn()
     cur = conn.cursor()
@@ -238,10 +210,8 @@ def set_normal_admin(target_email):
 def reset_user_password(email):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE app_users SET password_hash = %s, password_change_count = 1 WHERE email = %s",
-        (bcrypt.hash("123456"), email)
-    )
+    cur.execute("UPDATE app_users SET password_hash = %s WHERE email = %s",
+                (bcrypt.hash("123456"), email))
     conn.commit()
     cur.close()
     conn.close()
@@ -259,8 +229,7 @@ def delete_user(email):
 def list_users(keyword=""):
     conn = get_conn()
     sql = ('SELECT email AS 邮箱, name AS 姓名, student_id AS 学号, role AS 角色, '
-           'is_permanent_admin AS "永久Admin", password_change_count AS 已修改次数, '
-           'created_at AS 创建时间 FROM app_users')
+           'is_permanent_admin AS "永久Admin", created_at AS 创建时间 FROM app_users')
     params = []
     if keyword and keyword.strip():
         sql += " WHERE name ILIKE %s OR student_id ILIKE %s OR email ILIKE %s "
@@ -272,16 +241,16 @@ def list_users(keyword=""):
     return df
 
 
-def change_user_password(current_login_email, input_email, input_name, input_student_id, new_password):
+def change_user_password(current_login_email, input_email, input_name, input_student_id, old_password, new_password):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT email, name, student_id, password_change_count FROM app_users WHERE email = %s", (current_login_email,))
+    cur.execute("SELECT email, name, student_id, password_hash FROM app_users WHERE email = %s", (current_login_email,))
     row = cur.fetchone()
     if not row:
         cur.close()
         conn.close()
         return False, "系统错误：用户不存在"
-    db_email, db_name, db_student_id, change_count = row
+    db_email, db_name, db_student_id, db_password_hash = row
     if input_email.strip() != db_email:
         cur.close()
         conn.close()
@@ -294,16 +263,16 @@ def change_user_password(current_login_email, input_email, input_name, input_stu
         cur.close()
         conn.close()
         return False, "❌ 输入的学号与系统记录不匹配"
-    if change_count >= 2:
+    if not bcrypt.verify(old_password, db_password_hash):
         cur.close()
         conn.close()
-        return False, "您已经修改过 2 次密码，不能再自行修改。请联系管理员重置。"
-    cur.execute("UPDATE app_users SET password_hash = %s, password_change_count = password_change_count + 1 WHERE email = %s",
+        return False, "❌ 旧密码错误"
+    cur.execute("UPDATE app_users SET password_hash = %s WHERE email = %s",
                 (bcrypt.hash(new_password), current_login_email))
     conn.commit()
     cur.close()
     conn.close()
-    return True, f"✅ 密码修改成功（这是您第 {change_count + 1} 次修改）"
+    return True, "✅ 密码修改成功，请使用新密码登录"
 
 
 def insert_log(item_name, category, change_type, quantity, log_time, note, operator):
@@ -652,6 +621,43 @@ def export_multi_items_pdf(detail_df, selected_items):
     return buffer.getvalue()
 
 
+def render_user_table(df):
+    display_df = df[["邮箱", "姓名", "学号", "创建时间"]].copy()
+
+    def role_display(row):
+        email = row["邮箱"]
+        if df[df["邮箱"] == email]["永久Admin"].iloc[0]:
+            return "Admin"
+        role = df[df["邮箱"] == email]["角色"].iloc[0]
+        if role == "admin":
+            return "Admin"
+        return "Operator"
+
+    display_df.insert(3, "身份", df.apply(role_display, axis=1))
+
+    def style_role(val):
+        if val == "Admin":
+            email = None
+            for _, r in df.iterrows():
+                if r["永久Admin"]:
+                    email = r["邮箱"]
+                    break
+            return "color: #DAA520; font-weight: bold;"
+        return ""
+
+    styled = display_df.style.applymap(style_role, subset=["身份"])
+
+    perm_emails = set(df[df["永久Admin"]]["邮箱"].tolist())
+
+    def row_style(row):
+        if row["邮箱"] in perm_emails:
+            return ["background-color: #FFF8DC; color: #B8860B; font-weight: bold;"] * len(row)
+        return [""] * len(row)
+
+    styled = display_df.style.apply(row_style, axis=1)
+    return styled
+
+
 if "user" not in st.session_state:
     st.session_state.user = None
     st.session_state.role = None
@@ -660,23 +666,93 @@ if "user" not in st.session_state:
 
 if st.session_state.user is None:
     st.title("📦 团委学生会物资管理系统")
-    st.subheader("请登录")
-    with st.form("login_form"):
-        identifier = st.text_input("邮箱或学号")
-        password = st.text_input("密码", type="password")
-        if st.form_submit_button("登录", type="primary"):
-            if not identifier or not password:
-                st.error("请填写账号和密码")
-            else:
-                user = get_user(identifier.strip())
-                if user and bcrypt.verify(password, user[1]):
-                    st.session_state.user = user[0]
-                    st.session_state.role = user[2]
-                    st.session_state.name = user[3]
-                    st.session_state.student_id = user[4]
-                    st.rerun()
+
+    auth_tab1, auth_tab2 = st.tabs(["🔐 登录", "🔑 更改密码"])
+
+    with auth_tab1:
+        st.subheader("请登录")
+        with st.form("login_form"):
+            identifier = st.text_input("邮箱或学号")
+            password = st.text_input("密码", type="password")
+            if st.form_submit_button("登录", type="primary"):
+                if not identifier or not password:
+                    st.error("请填写账号和密码")
                 else:
-                    st.error("账号或密码错误")
+                    user = get_user(identifier.strip())
+                    if user and bcrypt.verify(password, user[1]):
+                        st.session_state.user = user[0]
+                        st.session_state.role = user[2]
+                        st.session_state.name = user[3]
+                        st.session_state.student_id = user[4]
+                        st.rerun()
+                    else:
+                        st.error("账号或密码错误")
+
+    with auth_tab2:
+        st.subheader("🔑 更改密码")
+        st.caption("无需登录。请填写你的姓名、学号、邮箱，并验证旧密码。忘记密码请联系管理员重置。")
+
+        with st.form("change_pwd_guest_form"):
+            st.markdown("##### 1. 身份信息")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                cp_name = st.text_input("姓名 *")
+            with col2:
+                cp_student_id = st.text_input("学号 *")
+            with col3:
+                cp_email = st.text_input("邮箱 *")
+
+            st.markdown("##### 2. 密码")
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                cp_old_pwd = st.text_input("旧密码 *", type="password")
+            with col5:
+                cp_new_pwd = st.text_input("新密码 *", type="password")
+            with col6:
+                cp_confirm_pwd = st.text_input("确认新密码 *", type="password")
+
+            submitted = st.form_submit_button("确认修改", type="primary")
+
+            if submitted:
+                errors = []
+                if not all([cp_name.strip(), cp_student_id.strip(), cp_email.strip(), cp_old_pwd, cp_new_pwd, cp_confirm_pwd]):
+                    errors.append("所有字段都必须填写")
+                elif cp_new_pwd != cp_confirm_pwd:
+                    errors.append("两次输入的新密码不一致")
+                elif len(cp_new_pwd) < 6:
+                    errors.append("新密码长度不能少于 6 位")
+
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    conn = get_conn()
+                    cur = conn.cursor()
+                    cur.execute("SELECT email, name, student_id, password_hash FROM app_users WHERE email = %s", (cp_email.strip(),))
+                    row = cur.fetchone()
+                    cur.close()
+                    conn.close()
+
+                    if not row:
+                        st.error("❌ 该邮箱不存在，请检查输入")
+                    else:
+                        db_email, db_name, db_student_id, db_password_hash = row
+                        if cp_name.strip() != db_name:
+                            st.error("❌ 姓名与系统记录不匹配")
+                        elif cp_student_id.strip() != db_student_id:
+                            st.error("❌ 学号与系统记录不匹配")
+                        elif not bcrypt.verify(cp_old_pwd, db_password_hash):
+                            st.error("❌ 旧密码错误")
+                        else:
+                            conn = get_conn()
+                            cur = conn.cursor()
+                            cur.execute("UPDATE app_users SET password_hash = %s WHERE email = %s",
+                                        (bcrypt.hash(cp_new_pwd), db_email))
+                            conn.commit()
+                            cur.close()
+                            conn.close()
+                            st.success("✅ 密码修改成功！请切换到「登录」标签登录。")
+
     st.stop()
 
 if not st.session_state.name or not st.session_state.student_id:
@@ -1049,7 +1125,6 @@ if "🔔 预警设置" in tab_dict:
 if "👥 用户管理" in tab_dict:
     with tab_dict["👥 用户管理"]:
         st.subheader("👥 用户管理")
-        st.caption("三种角色：**Operator**（录入、查询、导出）、**普通 Admin**（唯一，可转让）、**永久 Admin**（可多个，不被降级）。")
 
         conn = get_conn()
         cur = conn.cursor()
@@ -1066,7 +1141,8 @@ if "👥 用户管理" in tab_dict:
         if users_df.empty:
             st.info("没有匹配的用户。")
         else:
-            st.dataframe(users_df, use_container_width=True, hide_index=True)
+            styled = render_user_table(users_df)
+            st.dataframe(styled, use_container_width=True, hide_index=True)
             st.caption(f"共 {len(users_df)} 位用户")
 
         st.divider()
@@ -1100,45 +1176,8 @@ if "👥 用户管理" in tab_dict:
 
         if i_am_permanent:
             st.divider()
-            st.markdown("##### ⭐ 设置 / 取消永久 Admin")
-            st.caption("永久 Admin 拥有全部权限，且不会被降级。可以指定多个永久 Admin。")
-            perm_search = st.text_input("搜索目标用户（姓名 / 学号 / 邮箱）", "", key="perm_search", placeholder="输入关键词筛选")
-            candidates_df = list_users(perm_search) if perm_search.strip() else list_users("")
-            candidates_df = candidates_df[candidates_df["邮箱"] != st.session_state.user]
-            if candidates_df.empty:
-                st.info("没有可选用户。")
-            else:
-                display_list = [f"{r['姓名'] or '未填'}（{r['学号'] or '未填'}）- {r['邮箱']}｜当前角色：{r['角色']}{'（永久）' if r['永久Admin'] else ''}" for _, r in candidates_df.iterrows()]
-                selected_display = st.selectbox("选择用户", display_list, key="perm_target")
-                target_row = candidates_df.iloc[display_list.index(selected_display)]
-                target_email = target_row["邮箱"]
-                is_perm_now = target_row["永久Admin"]
-                col1, col2 = st.columns(2)
-                with col1:
-                    if not is_perm_now:
-                        if st.button("⭐ 设为永久 Admin"):
-                            ok, msg = set_permanent_admin(target_email, True)
-                            if ok:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-                    else:
-                        st.info("该用户已是永久 Admin")
-                with col2:
-                    if is_perm_now:
-                        if st.button("🚫 取消永久 Admin 标记"):
-                            ok, msg = set_permanent_admin(target_email, False)
-                            if ok:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-
-        if i_am_permanent:
-            st.divider()
             st.markdown("##### 👤 设置普通 Admin")
-            st.caption("普通 Admin 在整个系统中**只能有一个**。如果指定新的人选，原来的普通 Admin 会自动降级为 Operator。永久 Admin 不受影响。")
+            st.caption("普通 Admin 在整个系统中只能有一个。指定新的人选后，原来的普通 Admin 会自动降级为 Operator。")
             conn = get_conn()
             cur = conn.cursor()
             cur.execute("SELECT email, name FROM app_users WHERE role = 'admin' AND is_permanent_admin = FALSE LIMIT 1")
@@ -1168,12 +1207,10 @@ if "👥 用户管理" in tab_dict:
                     else:
                         st.error(msg)
 
-        st.divider()
-        st.markdown("##### 🔁 转让普通 Admin 权限")
-        st.caption("此项仅对**普通 Admin** 有效。转让后您将降为 Operator。永久 Admin 无需使用此功能。")
-        if i_am_permanent:
-            st.info("您是永久 Admin，无需转让权限。")
-        else:
+        if not i_am_permanent:
+            st.divider()
+            st.markdown("##### 🔁 转让普通 Admin 权限")
+            st.caption("转让后您将降为 Operator，目标用户成为新的普通 Admin。")
             other_users_df = list_users("")
             other_users_df = other_users_df[other_users_df["角色"] != "admin"].copy()
             if other_users_df.empty:
@@ -1216,7 +1253,7 @@ if "👥 用户管理" in tab_dict:
             with col1:
                 if st.button("重置密码为 123456"):
                     reset_user_password(target_email)
-                    st.success(f"已重置 {target_email} 的密码为 123456，该用户还可自行修改 1 次。")
+                    st.success(f"已重置 {target_email} 的密码为 123456。")
             with col2:
                 if st.button("🗑️ 删除该用户"):
                     if target_email == st.session_state.user:
@@ -1234,46 +1271,43 @@ if "👥 用户管理" in tab_dict:
 if "🔑 修改密码" in tab_dict:
     with tab_dict["🔑 修改密码"]:
         st.subheader("🔑 修改我的密码")
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT password_change_count FROM app_users WHERE email = %s", (st.session_state.user,))
-        cnt_row = cur.fetchone()
-        cur.close()
-        conn.close()
-        change_count = cnt_row[0] if cnt_row else 0
-        if change_count >= 2:
-            st.warning("⚠️ 您已经修改过 2 次密码，不能再自行修改。如需再次修改，请联系管理员重置密码（重置后密码将变回 123456）。")
-        else:
-            st.caption(f"您还可以修改 {2 - change_count} 次密码（无需验证旧密码，只需核对身份信息）。")
-            with st.form("change_pwd_form"):
-                st.markdown("##### 1. 身份信息核验")
-                st.caption("请手动输入你自己的邮箱、姓名和学号，系统会与数据库记录比对。")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    input_email = st.text_input("邮箱 *")
-                with col2:
-                    input_name = st.text_input("姓名 *")
-                with col3:
-                    input_student_id = st.text_input("学号 *")
-                st.divider()
-                st.markdown("##### 2. 设置新密码")
-                col4, col5 = st.columns(2)
-                with col4:
-                    new_pwd = st.text_input("新密码 *", type="password")
-                with col5:
-                    confirm_pwd = st.text_input("确认新密码 *", type="password")
-                if st.form_submit_button("确认修改", type="primary"):
-                    if not all([input_email, input_name, input_student_id, new_pwd, confirm_pwd]):
-                        st.error("所有字段都必须填写")
-                    elif new_pwd != confirm_pwd:
-                        st.error("两次输入的新密码不一致")
-                    elif len(new_pwd) < 6:
-                        st.error("新密码长度不能少于 6 位")
+        st.caption("请核对身份信息并验证旧密码。忘记密码请联系管理员重置。")
+
+        with st.form("change_pwd_form"):
+            st.markdown("##### 1. 身份信息核验")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                input_email = st.text_input("邮箱 *")
+            with col2:
+                input_name = st.text_input("姓名 *")
+            with col3:
+                input_student_id = st.text_input("学号 *")
+
+            st.divider()
+            st.markdown("##### 2. 密码设置")
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                old_pwd = st.text_input("旧密码 *", type="password")
+            with col5:
+                new_pwd = st.text_input("新密码 *", type="password")
+            with col6:
+                confirm_pwd = st.text_input("确认新密码 *", type="password")
+
+            if st.form_submit_button("确认修改", type="primary"):
+                if not all([input_email, input_name, input_student_id, old_pwd, new_pwd, confirm_pwd]):
+                    st.error("所有字段都必须填写")
+                elif new_pwd != confirm_pwd:
+                    st.error("两次输入的新密码不一致")
+                elif len(new_pwd) < 6:
+                    st.error("新密码长度不能少于 6 位")
+                else:
+                    ok, msg = change_user_password(
+                        st.session_state.user, input_email, input_name,
+                        input_student_id, old_pwd, new_pwd
+                    )
+                    if ok:
+                        st.success(msg)
+                        st.info("下次登录请使用新密码。")
+                        st.rerun()
                     else:
-                        ok, msg = change_user_password(st.session_state.user, input_email, input_name, input_student_id, new_pwd)
-                        if ok:
-                            st.success(msg)
-                            st.info("下次登录请使用新密码。")
-                            st.rerun()
-                        else:
-                            st.error(msg)
+                        st.error(msg)
