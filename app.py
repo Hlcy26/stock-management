@@ -1,14 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-团委学生会物资管理系统（Streamlit Cloud + Supabase 完整版）
-功能：出入库、批量导入、库存查询、学期查询、预警、导出、邮箱/学号登录、
-      Operator / 普通Admin / 永久Admin 三级权限、密码修改2次限制
-数量统一为整数，不支持小数。
-"""
 
 import io
 import os
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone, timedelta
 
 import pandas as pd
 import psycopg2
@@ -21,16 +15,15 @@ st.set_page_config(page_title="团委学生会物资管理", layout="wide")
 CATEGORIES = ["办公用品", "活动物资", "宣传用品", "奖品/证书", "借用物资", "其他"]
 TAB_ROLES = {
     "📝 录入出入库": ["operator", "admin"],
-    "🔍 库存与记录查询": ["operator", "admin"],
+    "🔍 查询与导出": ["operator", "admin"],
     "📅 按学期查询": ["operator", "admin"],
     "⚙️ 学期管理": ["admin"],
     "🔔 预警设置": ["operator", "admin"],
-    "📤 导出数据": ["operator", "admin"],
     "👥 用户管理": ["admin"],
     "🔑 修改密码": ["operator", "admin"],
 }
 
-# ==================== 数据库连接 ====================
+
 def get_conn():
     return psycopg2.connect(
         host=st.secrets["DB_HOST"], port=st.secrets["DB_PORT"],
@@ -38,7 +31,7 @@ def get_conn():
         password=st.secrets["DB_PASSWORD"], connect_timeout=10
     )
 
-# ==================== 初始化 ====================
+
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -94,8 +87,7 @@ def init_db():
         default_email = st.secrets.get("DEFAULT_ADMIN_EMAIL", "admin@example.com")
         default_password = st.secrets.get("DEFAULT_ADMIN_PASSWORD", "admin123456")
         cur.execute(
-            "INSERT INTO app_users (email, password_hash, role, password_change_count, is_permanent_admin) "
-            "VALUES (%s,%s,%s,%s,%s)",
+            "INSERT INTO app_users (email, password_hash, role, password_change_count, is_permanent_admin) VALUES (%s,%s,%s,%s,%s)",
             (default_email, bcrypt.hash(default_password), "admin", 0, True)
         )
 
@@ -109,19 +101,19 @@ def init_db():
     cur.close()
     conn.close()
 
+
 try:
     init_db()
 except Exception as e:
     st.error(f"数据库初始化失败：{e}")
     st.stop()
 
-# ==================== 用户管理 ====================
+
 def get_user(identifier):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT email, password_hash, role, name, student_id, is_permanent_admin "
-        "FROM app_users WHERE email = %s OR student_id = %s",
+        "SELECT email, password_hash, role, name, student_id, is_permanent_admin FROM app_users WHERE email = %s OR student_id = %s",
         (identifier, identifier)
     )
     row = cur.fetchone()
@@ -129,13 +121,13 @@ def get_user(identifier):
     conn.close()
     return row
 
+
 def create_user(email, name, student_id):
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
-            "INSERT INTO app_users (email, name, student_id, password_hash, role, password_change_count, is_permanent_admin) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO app_users (email, name, student_id, password_hash, role, password_change_count, is_permanent_admin) VALUES (%s,%s,%s,%s,%s,%s,%s)",
             (email, name, student_id, bcrypt.hash("123456"), "operator", 0, False)
         )
         conn.commit()
@@ -147,6 +139,7 @@ def create_user(email, name, student_id):
         cur.close()
         conn.close()
 
+
 def update_user_profile(email, name, student_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -154,6 +147,7 @@ def update_user_profile(email, name, student_id):
     conn.commit()
     cur.close()
     conn.close()
+
 
 def transfer_admin(from_email, to_email):
     if from_email == to_email:
@@ -184,6 +178,7 @@ def transfer_admin(from_email, to_email):
         cur.close()
         conn.close()
 
+
 def set_permanent_admin(target_email, is_permanent):
     conn = get_conn()
     cur = conn.cursor()
@@ -210,6 +205,7 @@ def set_permanent_admin(target_email, is_permanent):
     finally:
         cur.close()
         conn.close()
+
 
 def set_normal_admin(target_email):
     conn = get_conn()
@@ -238,6 +234,7 @@ def set_normal_admin(target_email):
         cur.close()
         conn.close()
 
+
 def reset_user_password(email):
     conn = get_conn()
     cur = conn.cursor()
@@ -249,6 +246,7 @@ def reset_user_password(email):
     cur.close()
     conn.close()
 
+
 def delete_user(email):
     conn = get_conn()
     cur = conn.cursor()
@@ -256,6 +254,7 @@ def delete_user(email):
     conn.commit()
     cur.close()
     conn.close()
+
 
 def list_users(keyword=""):
     conn = get_conn()
@@ -272,77 +271,80 @@ def list_users(keyword=""):
     conn.close()
     return df
 
+
 def change_user_password(current_login_email, input_email, input_name, input_student_id, new_password):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT email, name, student_id, password_change_count FROM app_users WHERE email = %s", (current_login_email,))
     row = cur.fetchone()
     if not row:
-        cur.close(); conn.close(); return False, "系统错误：用户不存在"
+        cur.close()
+        conn.close()
+        return False, "系统错误：用户不存在"
     db_email, db_name, db_student_id, change_count = row
     if input_email.strip() != db_email:
-        cur.close(); conn.close(); return False, "❌ 输入的邮箱与当前登录账号不匹配"
+        cur.close()
+        conn.close()
+        return False, "❌ 输入的邮箱与当前登录账号不匹配"
     if input_name.strip() != db_name:
-        cur.close(); conn.close(); return False, "❌ 输入的姓名与系统记录不匹配"
+        cur.close()
+        conn.close()
+        return False, "❌ 输入的姓名与系统记录不匹配"
     if input_student_id.strip() != db_student_id:
-        cur.close(); conn.close(); return False, "❌ 输入的学号与系统记录不匹配"
+        cur.close()
+        conn.close()
+        return False, "❌ 输入的学号与系统记录不匹配"
     if change_count >= 2:
-        cur.close(); conn.close(); return False, "您已经修改过 2 次密码，不能再自行修改。请联系管理员重置。"
+        cur.close()
+        conn.close()
+        return False, "您已经修改过 2 次密码，不能再自行修改。请联系管理员重置。"
     cur.execute("UPDATE app_users SET password_hash = %s, password_change_count = password_change_count + 1 WHERE email = %s",
                 (bcrypt.hash(new_password), current_login_email))
     conn.commit()
-    cur.close(); conn.close()
+    cur.close()
+    conn.close()
     return True, f"✅ 密码修改成功（这是您第 {change_count + 1} 次修改）"
 
-# ==================== 出入库 ====================
+
 def insert_log(item_name, category, change_type, quantity, log_time, note, operator):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT INTO stock_log(item_name, category, change_type, quantity, log_time, note, operator) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                 (item_name, category, change_type, quantity, log_time, note, operator))
-    conn.commit(); cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
+
 
 def get_stock(item_name):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COALESCE(SUM(CASE WHEN change_type='IN' THEN quantity ELSE -quantity END), 0) FROM stock_log WHERE item_name = %s", (item_name,))
     row = cur.fetchone()
-    cur.close(); conn.close()
+    cur.close()
+    conn.close()
     return row[0] if row else 0
 
-def _parse_datetime(row):
-    """从 Excel 一行数据解析出 'YYYY-MM-DD HH:MM:SS'（Excel 中已无时间列，统一用 00:00:00）"""
-    d = row.get("日期")
-    if d is None or pd.isna(d):
-        raise ValueError("日期不能为空")
-    d_str = pd.to_datetime(d).strftime("%Y-%m-%d")
-    t = row.get("时间", None)
-    if t is None or pd.isna(t) or str(t).strip() == "":
-        t_str = "00:00:00"
-    else:
-        t_str = str(t).strip()
-        parts = t_str.split(":")
-        if len(parts) == 2:
-            t_str = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:00"
-        elif len(parts) == 3:
-            t_str = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:{parts[2].zfill(2)}"
-        else:
-            t_str = "00:00:00"
-    return f"{d_str} {t_str}"
 
-def import_logs_from_excel(df, default_operator):
-    success = 0; errors = []
-    conn = get_conn(); cur = conn.cursor()
+def import_logs_from_excel(df, fixed_operator, fixed_date):
+    success = 0
+    errors = []
+    conn = get_conn()
+    cur = conn.cursor()
     for idx, row in df.iterrows():
         row_num = idx + 2
         try:
             item = str(row.get("物品名称", "")).strip()
-            if not item: errors.append(f"第 {row_num} 行：物品名称为空"); continue
+            if not item:
+                errors.append(f"第 {row_num} 行：物品名称为空")
+                continue
             category = str(row.get("类别", "")).strip() or "其他"
-            if category not in CATEGORIES: category = "其他"
+            if category not in CATEGORIES:
+                category = "其他"
             ctype_cn = str(row.get("类型", "")).strip()
-            if ctype_cn not in ("入库", "出库"): errors.append(f"第 {row_num} 行：类型必须是「入库」或「出库」"); continue
-            # 数量校验：必须是正整数
+            if ctype_cn not in ("入库", "出库"):
+                errors.append(f"第 {row_num} 行：类型必须是「入库」或「出库」")
+                continue
             try:
                 qty_val = row.get("数量")
                 if pd.isna(qty_val):
@@ -358,24 +360,28 @@ def import_logs_from_excel(df, default_operator):
             if qty <= 0:
                 errors.append(f"第 {row_num} 行：数量必须大于 0")
                 continue
-            try: log_time = _parse_datetime(row)
-            except Exception as e: errors.append(f"第 {row_num} 行：{e}"); continue
-            operator_val = str(row.get("操作人", "")).strip() or default_operator
             note_val = row.get("备注", "")
             note_val = "" if (note_val is None or pd.isna(note_val)) else str(note_val).strip()
             change_type = "IN" if ctype_cn == "入库" else "OUT"
+            log_time = f"{fixed_date} 00:00:00"
+            operator_val = fixed_operator
             if change_type == "OUT":
                 cur.execute("SELECT COALESCE(SUM(CASE WHEN change_type='IN' THEN quantity ELSE -quantity END), 0) FROM stock_log WHERE item_name = %s", (item,))
                 stock = cur.fetchone()[0]
-                if stock < qty: errors.append(f"第 {row_num} 行：{item} 库存不足（当前 {stock}，需出库 {qty}）"); continue
+                if stock < qty:
+                    errors.append(f"第 {row_num} 行：{item} 库存不足（当前 {stock}，需出库 {qty}）")
+                    continue
             cur.execute("INSERT INTO stock_log(item_name, category, change_type, quantity, log_time, note, operator) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                         (item, category, change_type, qty, log_time, note_val, operator_val))
             success += 1
-        except Exception as e: errors.append(f"第 {row_num} 行：{e}")
-    conn.commit(); cur.close(); conn.close()
+        except Exception as e:
+            errors.append(f"第 {row_num} 行：{e}")
+    conn.commit()
+    cur.close()
+    conn.close()
     return success, errors
 
-# ==================== 查询 ====================
+
 def query_stock(keyword="", category="全部"):
     conn = get_conn()
     sql = """
@@ -389,7 +395,8 @@ def query_stock(keyword="", category="全部"):
     """
     params = [f"%{keyword}%"]
     if category and category != "全部":
-        sql += " AND sl.category = %s"; params.append(category)
+        sql += " AND sl.category = %s"
+        params.append(category)
     sql += " GROUP BY sl.item_name ORDER BY sl.item_name"
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
@@ -397,10 +404,13 @@ def query_stock(keyword="", category="全部"):
         df["状态"] = df.apply(lambda r: "⚠️ 库存不足" if pd.notna(r["预警阈值"]) and r["当前库存"] < r["预警阈值"] else "✅ 正常", axis=1)
     return df
 
+
 def query_stock_only(keyword="", category="全部"):
     df = query_stock(keyword, category)
-    if df.empty: return df
+    if df.empty:
+        return df
     return df[["物品名称", "类别", "当前库存", "预警阈值", "状态"]]
+
 
 def query_logs(keyword, start_dt, end_dt, category="全部"):
     conn = get_conn()
@@ -412,10 +422,13 @@ def query_logs(keyword, start_dt, end_dt, category="全部"):
     """
     params = [f"%{keyword}%", start_dt, end_dt]
     if category and category != "全部":
-        sql += " AND category = %s"; params.append(category)
+        sql += " AND category = %s"
+        params.append(category)
     sql += " ORDER BY log_time DESC"
     df = pd.read_sql_query(sql, conn, params=params)
-    conn.close(); return df
+    conn.close()
+    return df
+
 
 def query_summary(keyword, start_dt, end_dt, category="全部"):
     conn = get_conn()
@@ -429,7 +442,8 @@ def query_summary(keyword, start_dt, end_dt, category="全部"):
     """
     params = [start_dt, start_dt, end_dt, start_dt, end_dt, end_dt, f"%{keyword}%"]
     if category and category != "全部":
-        sql += " AND category = %s"; params.append(category)
+        sql += " AND category = %s"
+        params.append(category)
     sql += " GROUP BY item_name ORDER BY item_name"
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
@@ -437,16 +451,21 @@ def query_summary(keyword, start_dt, end_dt, category="全部"):
         df = df[df[["期初库存", "期间入库", "期间出库", "期末库存"]].abs().sum(axis=1) > 0]
     return df
 
+
 def query_ranking(start_dt, end_dt, top_n=10):
     conn = get_conn()
     sql = "SELECT item_name AS 物品名称, SUM(quantity) AS 出库数量 FROM stock_log WHERE change_type='OUT' AND log_time BETWEEN %s AND %s GROUP BY item_name ORDER BY 出库数量 DESC LIMIT %s"
     df = pd.read_sql_query(sql, conn, params=(start_dt, end_dt, top_n))
-    conn.close(); return df
+    conn.close()
+    return df
+
 
 def get_all_items():
     conn = get_conn()
     df = pd.read_sql_query("SELECT DISTINCT item_name FROM stock_log ORDER BY item_name", conn)
-    conn.close(); return df["item_name"].tolist()
+    conn.close()
+    return df["item_name"].tolist()
+
 
 def get_alerts():
     conn = get_conn()
@@ -460,71 +479,77 @@ def get_alerts():
         df["状态"] = df.apply(lambda r: "⚠️ 库存不足" if r["当前库存"] < r["预警阈值"] else "✅ 正常", axis=1)
     return df
 
+
 def set_alert(item_name, min_quantity):
-    conn = get_conn(); cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
     cur.execute("INSERT INTO stock_alert(item_name, min_quantity, updated_at) VALUES (%s, %s, CURRENT_TIMESTAMP) ON CONFLICT(item_name) DO UPDATE SET min_quantity = EXCLUDED.min_quantity, updated_at = CURRENT_TIMESTAMP", (item_name, min_quantity))
-    conn.commit(); cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
+
 
 def delete_alert(item_name):
-    conn = get_conn(); cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
     cur.execute("DELETE FROM stock_alert WHERE item_name=%s", (item_name,))
-    conn.commit(); cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
 
-# ==================== 学期 ====================
+
 def get_semesters():
     conn = get_conn()
     df = pd.read_sql_query("SELECT id, name AS 学期名称, start_date AS 开始日期, end_date AS 结束日期 FROM semesters ORDER BY start_date DESC", conn)
-    conn.close(); return df
+    conn.close()
+    return df
+
 
 def add_semester(name, start_date, end_date):
-    conn = get_conn(); cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
     try:
         cur.execute("INSERT INTO semesters(name, start_date, end_date) VALUES (%s,%s,%s)", (name, start_date, end_date))
-        conn.commit(); return True, "添加成功"
+        conn.commit()
+        return True, "添加成功"
     except psycopg2.errors.UniqueViolation:
-        conn.rollback(); return False, "学期名称已存在"
+        conn.rollback()
+        return False, "学期名称已存在"
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
+
 
 def delete_semester(sid):
-    conn = get_conn(); cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
     cur.execute("DELETE FROM semesters WHERE id=%s", (sid,))
-    conn.commit(); cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
+
 
 def get_default_semester(semesters_df):
     today = date.today().strftime("%Y-%m-%d")
     for _, row in semesters_df.iterrows():
-        if row["开始日期"] <= today <= row["结束日期"]: return row["学期名称"]
+        if row["开始日期"] <= today <= row["结束日期"]:
+            return row["学期名称"]
     return semesters_df.iloc[0]["学期名称"] if not semesters_df.empty else None
 
-# ==================== 导出 ====================
+
 def _prepare_stock_df(keyword="", category="全部"):
     df = query_stock(keyword, category)
-    if df.empty: return df
+    if df.empty:
+        return df
     return df[["物品名称", "类别", "累计入库", "累计出库", "当前库存", "预警阈值", "状态"]]
 
-def export_to_excel(keyword="", category="全部", include_logs=False, log_start=None, log_end=None):
-    stock_df = _prepare_stock_df(keyword, category)
-    if stock_df.empty: return None
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        stock_df.to_excel(writer, sheet_name="库存汇总", index=False)
-        if include_logs and log_start and log_end:
-            logs_df = query_logs(keyword, log_start, log_end, category)
-            if not logs_df.empty:
-                logs_df.to_excel(writer, sheet_name="出入库记录", index=False)
-    return output.getvalue()
 
 def generate_import_template():
-    """生成带下拉选择的 Excel 模板（类别、类型为下拉）"""
-    today = date.today().strftime("%Y-%m-%d")
     template_df = pd.DataFrame({
         "物品名称": ["示例：中性笔", "示例：A4纸"],
         "类别": ["办公用品", "办公用品"],
         "类型": ["入库", "出库"],
         "数量": [20, 5],
-        "日期": [today, today],
-        "操作人": ["张三", "李四"],
         "备注": ["示例行，可删除", "示例行，可删除"],
     })
     output = io.BytesIO()
@@ -532,106 +557,149 @@ def generate_import_template():
         template_df.to_excel(writer, sheet_name="出入库导入", index=False)
         wb = writer.book
         ws = writer.sheets["出入库导入"]
-        dv_category = DataValidation(
-            type="list", formula1=f'"{",".join(CATEGORIES)}"',
-            allow_blank=True, showDropDown=False,
-        )
+        dv_category = DataValidation(type="list", formula1=f'"{",".join(CATEGORIES)}"', allow_blank=True, showDropDown=False)
         dv_category.error = "请从下拉列表中选择类别"
         dv_category.errorTitle = "类别无效"
         ws.add_data_validation(dv_category)
         dv_category.add("B2:B1000")
-        dv_type = DataValidation(
-            type="list", formula1='"入库,出库"',
-            allow_blank=False, showDropDown=False,
-        )
+        dv_type = DataValidation(type="list", formula1='"入库,出库"', allow_blank=False, showDropDown=False)
         dv_type.error = "类型只能填「入库」或「出库」"
         dv_type.errorTitle = "类型无效"
         ws.add_data_validation(dv_type)
         dv_type.add("C2:C1000")
     return output.getvalue()
 
+
 def _register_chinese_font():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    candidates = [("SimHei", "C:/Windows/Fonts/simhei.ttf"), ("MicrosoftYaHei", "C:/Windows/Fonts/msyh.ttf"),
-                  ("SimSun", "C:/Windows/Fonts/simsun.ttf"), ("PingFang", "/System/Library/Fonts/PingFang.ttc"),
-                  ("WQY", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc")]
+    candidates = [
+        ("SimHei", "C:/Windows/Fonts/simhei.ttf"),
+        ("MicrosoftYaHei", "C:/Windows/Fonts/msyh.ttf"),
+        ("SimSun", "C:/Windows/Fonts/simsun.ttf"),
+        ("PingFang", "/System/Library/Fonts/PingFang.ttc"),
+        ("WQY", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc")
+    ]
     for name, path in candidates:
         if os.path.exists(path):
-            try: pdfmetrics.registerFont(TTFont(name, path)); return name
-            except Exception: continue
+            try:
+                pdfmetrics.registerFont(TTFont(name, path))
+                return name
+            except Exception:
+                continue
     return "Helvetica"
 
-def export_to_pdf(keyword="", category="全部", include_logs=False, log_start=None, log_end=None):
+
+def export_multi_items_excel(detail_df, selected_items):
+    if not selected_items:
+        return None
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for item in selected_items:
+            sub = detail_df[detail_df["物品名称"] == item]
+            if sub.empty:
+                continue
+            sheet_name = str(item)[:31].replace("/", "_").replace("\\", "_").replace("?", "_").replace("*", "_").replace("[", "_").replace("]", "_")
+            sub.to_excel(writer, sheet_name=sheet_name, index=False)
+    return output.getvalue()
+
+
+def export_multi_items_pdf(detail_df, selected_items):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-    stock_df = _prepare_stock_df(keyword, category)
-    if stock_df.empty: return None
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
+
+    if not selected_items:
+        return None
     font_name = _register_chinese_font()
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=12*mm, rightMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("T", parent=styles["Title"], fontName=font_name, fontSize=18, leading=24)
-    h_style = ParagraphStyle("H", parent=styles["Heading2"], fontName=font_name, fontSize=13, leading=18)
-    normal_style = ParagraphStyle("N", parent=styles["Normal"], fontName=font_name, fontSize=10, leading=14)
-    elements = [Paragraph("团委学生会物资库存报表", title_style), Spacer(1, 4*mm),
-                Paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style), Spacer(1, 6*mm)]
-    def df_to_table(df, font_size=9):
+    title_style = ParagraphStyle("T", parent=styles["Title"], fontName=font_name, fontSize=16, leading=22)
+    normal_style = ParagraphStyle("N", parent=styles["Normal"], fontName=font_name, fontSize=9, leading=12)
+
+    elements = []
+
+    def df_to_table(df, font_size=8):
         data = [list(df.columns)] + df.fillna("").astype(str).values.tolist()
         t = Table(data, repeatRows=1)
-        t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), font_name), ("FONTSIZE", (0, 0), (-1, -1), font_size),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4A6FA5")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        t.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), font_name),
+            ("FONTSIZE", (0, 0), (-1, -1), font_size),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4A6FA5")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F5FA")])]))
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F5FA")]),
+        ]))
         return t
-    elements.append(Paragraph("一、库存汇总", h_style)); elements.append(Spacer(1, 2*mm))
-    elements.append(df_to_table(stock_df, font_size=9))
-    if include_logs and log_start and log_end:
-        logs_df = query_logs(keyword, log_start, log_end, category)
-        if not logs_df.empty:
-            elements.append(Spacer(1, 8*mm)); elements.append(Paragraph("二、出入库记录", h_style))
-            elements.append(Spacer(1, 2*mm)); elements.append(df_to_table(logs_df, font_size=8))
-    doc.build(elements); return buffer.getvalue()
 
-# ==================== 登录 ====================
+    for idx, item in enumerate(selected_items):
+        sub = detail_df[detail_df["物品名称"] == item]
+        if sub.empty:
+            continue
+        if idx > 0:
+            elements.append(PageBreak())
+        elements.append(Paragraph(f"物资出入库记录：{item}", title_style))
+        elements.append(Spacer(1, 4*mm))
+        elements.append(Paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
+        elements.append(Spacer(1, 4*mm))
+        elements.append(df_to_table(sub, font_size=8))
+    doc.build(elements)
+    return buffer.getvalue()
+
+
 if "user" not in st.session_state:
-    st.session_state.user = None; st.session_state.role = None
-    st.session_state.name = None; st.session_state.student_id = None
+    st.session_state.user = None
+    st.session_state.role = None
+    st.session_state.name = None
+    st.session_state.student_id = None
 
 if st.session_state.user is None:
-    st.title("📦 团委学生会物资管理系统"); st.subheader("请登录")
+    st.title("📦 团委学生会物资管理系统")
+    st.subheader("请登录")
     with st.form("login_form"):
-        identifier = st.text_input("邮箱或学号"); password = st.text_input("密码", type="password")
+        identifier = st.text_input("邮箱或学号")
+        password = st.text_input("密码", type="password")
         if st.form_submit_button("登录", type="primary"):
-            if not identifier or not password: st.error("请填写账号和密码")
+            if not identifier or not password:
+                st.error("请填写账号和密码")
             else:
                 user = get_user(identifier.strip())
                 if user and bcrypt.verify(password, user[1]):
-                    st.session_state.user = user[0]; st.session_state.role = user[2]
-                    st.session_state.name = user[3]; st.session_state.student_id = user[4]
+                    st.session_state.user = user[0]
+                    st.session_state.role = user[2]
+                    st.session_state.name = user[3]
+                    st.session_state.student_id = user[4]
                     st.rerun()
-                else: st.error("账号或密码错误")
+                else:
+                    st.error("账号或密码错误")
     st.stop()
 
 if not st.session_state.name or not st.session_state.student_id:
-    st.title("📦 团委学生会物资管理系统"); st.subheader("首次登录，请完善个人信息")
+    st.title("📦 团委学生会物资管理系统")
+    st.subheader("首次登录，请完善个人信息")
     with st.form("complete_profile"):
         col1, col2 = st.columns(2)
-        with col1: name = st.text_input("姓名 *")
-        with col2: student_id = st.text_input("学号 *")
+        with col1:
+            name = st.text_input("姓名 *")
+        with col2:
+            student_id = st.text_input("学号 *")
         if st.form_submit_button("确认", type="primary"):
-            if not name.strip(): st.error("姓名不能为空")
-            elif not student_id.strip(): st.error("学号不能为空")
+            if not name.strip():
+                st.error("姓名不能为空")
+            elif not student_id.strip():
+                st.error("学号不能为空")
             else:
                 update_user_profile(st.session_state.user, name.strip(), student_id.strip())
-                st.session_state.name = name.strip(); st.session_state.student_id = student_id.strip(); st.rerun()
+                st.session_state.name = name.strip()
+                st.session_state.student_id = student_id.strip()
+                st.rerun()
     st.stop()
 
-# ==================== 主应用 ====================
 st.title("📦 团委学生会物资管理系统")
 st.sidebar.markdown(f"**当前用户**：{st.session_state.name}")
 st.sidebar.markdown(f"**学号**：{st.session_state.student_id}")
@@ -639,8 +707,11 @@ st.sidebar.markdown(f"**邮箱**：{st.session_state.user}")
 _role_label = "Admin（管理员）" if st.session_state.role == "admin" else "Operator（操作员）"
 st.sidebar.markdown(f"**角色**：{_role_label}")
 if st.sidebar.button("退出登录"):
-    st.session_state.user = None; st.session_state.role = None
-    st.session_state.name = None; st.session_state.student_id = None; st.rerun()
+    st.session_state.user = None
+    st.session_state.role = None
+    st.session_state.name = None
+    st.session_state.student_id = None
+    st.rerun()
 
 _alerts = get_alerts()
 if not _alerts.empty:
@@ -653,11 +724,16 @@ allowed = [name for name, roles in TAB_ROLES.items() if role in roles]
 tab_objs = st.tabs(allowed)
 tab_dict = dict(zip(allowed, tab_objs))
 
-# ---------- 录入出入库 ----------
+
 if "📝 录入出入库" in tab_dict:
     with tab_dict["📝 录入出入库"]:
         st.subheader("录入出入库")
         mode = st.radio("录入方式", ["✍️ 单条录入", "📥 批量导入 Excel"], horizontal=True, key="entry_mode")
+
+        tz = timezone(timedelta(hours=8))
+        now_bj = datetime.now(tz)
+        today_bj_str = now_bj.strftime("%Y-%m-%d")
+
         if mode == "✍️ 单条录入":
             existing_items = get_all_items()
             with st.form("entry_form", clear_on_submit=True):
@@ -671,238 +747,356 @@ if "📝 录入出入库" in tab_dict:
                 with col2:
                     change_type_cn = st.selectbox("类型 *", ["入库", "出库"])
                     quantity = st.number_input("数量 *", min_value=1, step=1, value=1, format="%d")
-                col3, col4, col5 = st.columns(3)
-                with col3: log_date = st.date_input("日期 *", value=date.today())
-                with col4: operator = st.text_input("操作人 *", value=st.session_state.name or "")
-                with col5: note = st.text_input("备注")
+
+                use_single_custom_date = st.checkbox("📅 使用自定义日期", value=False, key="single_use_custom_date")
+                if use_single_custom_date:
+                    single_date = st.date_input("选择日期", value=date.today(), key="single_custom_date")
+                    single_final_date = single_date.strftime("%Y-%m-%d")
+                    single_date_source = "自定义"
+                else:
+                    single_final_date = today_bj_str
+                    single_date_source = "北京时间"
+
+                st.info(f"📌 操作人：{st.session_state.name}　|　📅 日期：{single_final_date}（{single_date_source}）")
+
+                col3, col4 = st.columns(2)
+                with col3:
+                    note = st.text_input("备注")
+
                 if st.form_submit_button("提交", type="primary"):
                     errors = []
-                    if not item_name or not str(item_name).strip(): errors.append("物品名称不能为空")
-                    if not operator or not operator.strip(): errors.append("操作人不能为空")
+                    if not item_name or not str(item_name).strip():
+                        errors.append("物品名称不能为空")
+
                     if errors:
-                        for e in errors: st.error(e)
+                        for e in errors:
+                            st.error(e)
                     else:
-                        log_time = f"{log_date.strftime('%Y-%m-%d')} 00:00:00"
+                        log_time = f"{single_final_date} 00:00:00"
                         change_type = "IN" if change_type_cn == "入库" else "OUT"
-                        clean_name = str(item_name).strip(); clean_operator = operator.strip()
+                        clean_name = str(item_name).strip()
+                        clean_operator = st.session_state.name
+
                         if change_type == "OUT":
                             stock = get_stock(clean_name)
-                            if stock < quantity: st.error(f"库存不足！【{clean_name}】当前库存：{stock}")
+                            if stock < quantity:
+                                st.error(f"库存不足！【{clean_name}】当前库存：{stock}")
                             else:
                                 insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
-                                st.success(f"✅ 已录入出库：{clean_name} × {quantity}")
+                                st.success(f"✅ 已录入出库：{clean_name} × {quantity}（{single_final_date}）")
                         else:
                             insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
-                            st.success(f"✅ 已录入入库：{clean_name} × {quantity}")
+                            st.success(f"✅ 已录入入库：{clean_name} × {quantity}（{single_final_date}）")
         else:
             st.markdown("##### 📋 使用说明")
             st.markdown("""
             1. 点击下方按钮下载 Excel 模板
-            2. 按模板格式填写（**物品名称、类别、类型、数量、日期**为必填）
+            2. 按模板格式填写（**物品名称、类别、类型、数量**为必填）
             3. **类别**和**类型**列点击单元格会出现下拉箭头，直接从列表中选择即可
             4. **数量**列请填写整数（不支持小数）
             5. 上传填好的 Excel 文件，确认导入
             """)
+
+            col_d1, col_d2 = st.columns([1, 2])
+            with col_d1:
+                use_custom_date = st.checkbox("📅 使用自定义日期", value=False, key="use_custom_date")
+            if use_custom_date:
+                with col_d2:
+                    custom_date = st.date_input("选择日期", value=date.today(), key="batch_custom_date")
+                final_date = custom_date.strftime("%Y-%m-%d")
+                date_source = "自定义"
+            else:
+                final_date = today_bj_str
+                date_source = "北京时间"
+
+            st.info(f"📌 本次导入的所有记录，操作人统一为：**{st.session_state.name}**　|　📅 日期统一为：**{final_date}**（{date_source}）")
+
             col1, col2 = st.columns(2)
-            with col1: st.download_button("⬇️ 下载 Excel 模板", generate_import_template(), file_name="出入库导入模板.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            with col1:
+                st.download_button("⬇️ 下载 Excel 模板", generate_import_template(), file_name="出入库导入模板.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             uploaded_file = st.file_uploader("上传填好的 Excel 文件（.xlsx）", type=["xlsx"], key="import_file")
             if uploaded_file is not None:
                 try:
                     df_import = pd.read_excel(uploaded_file, sheet_name=0)
                     df_import.columns = [str(c).strip() for c in df_import.columns]
-                    required_cols = {"物品名称", "类别", "类型", "数量", "日期"}
+                    required_cols = {"物品名称", "类别", "类型", "数量"}
                     missing = required_cols - set(df_import.columns)
-                    if missing: st.error(f"缺少必需的列：{', '.join(missing)}。请下载模板并按格式填写。")
-                    elif df_import.empty: st.warning("文件中没有数据行。")
+                    if missing:
+                        st.error(f"缺少必需的列：{', '.join(missing)}。请下载模板并按格式填写。")
+                    elif df_import.empty:
+                        st.warning("文件中没有数据行。")
                     else:
-                        st.markdown("##### 📄 数据预览"); st.dataframe(df_import, use_container_width=True, hide_index=True)
+                        st.markdown("##### 📄 数据预览")
+                        st.dataframe(df_import, use_container_width=True, hide_index=True)
                         st.caption(f"共 {len(df_import)} 行待导入")
-                        default_op = st.text_input("默认操作人（当行内未填操作人时使用）", value=st.session_state.name or st.session_state.user, key="import_default_operator")
                         if st.button("✅ 确认导入", type="primary", key="btn_import"):
                             with st.spinner("导入中..."):
-                                success, errors = import_logs_from_excel(df_import, default_op.strip())
-                            if success > 0: st.success(f"✅ 成功导入 {success} 条记录")
+                                success, errors = import_logs_from_excel(df_import, st.session_state.name, final_date)
+                            if success > 0:
+                                st.success(f"✅ 成功导入 {success} 条记录（操作人：{st.session_state.name}，日期：{final_date}）")
                             if errors:
                                 with st.expander(f"⚠️ 有 {len(errors)} 行未导入，点击查看原因"):
-                                    for e in errors: st.write(f"- {e}")
-                            if success > 0 and not errors: st.balloons()
-                except Exception as e: st.error(f"读取文件失败：{e}")
+                                    for e in errors:
+                                        st.write(f"- {e}")
+                            if success > 0 and not errors:
+                                st.balloons()
+                except Exception as e:
+                    st.error(f"读取文件失败：{e}")
 
-# ---------- 库存与记录查询 ----------
-if "🔍 库存与记录查询" in tab_dict:
-    with tab_dict["🔍 库存与记录查询"]:
-        st.subheader("库存与出入库记录查询")
+
+if "🔍 查询与导出" in tab_dict:
+    with tab_dict["🔍 查询与导出"]:
+        st.subheader("查询与导出")
         col1, col2, col3, col4 = st.columns(4)
-        with col1: keyword = st.text_input("物品名称关键词", "")
-        with col2: category_filter = st.selectbox("类别筛选", ["全部"] + CATEGORIES)
-        with col3: start_date = st.date_input("开始日期", value=date.today().replace(day=1))
-        with col4: end_date = st.date_input("结束日期", value=date.today())
+        with col1:
+            keyword = st.text_input("物品名称关键词", "")
+        with col2:
+            category_filter = st.selectbox("类别筛选", ["全部"] + CATEGORIES)
+        with col3:
+            start_date = st.date_input("开始日期", value=date.today().replace(day=1))
+        with col4:
+            end_date = st.date_input("结束日期", value=date.today())
+
         only_stock = st.checkbox("🔎 只看库存（不显示时间段汇总和明细）", value=False)
+
         if st.button("查询", type="primary", key="btn_query"):
             start_dt = datetime.combine(start_date, time.min).strftime("%Y-%m-%d %H:%M:%S")
             end_dt = datetime.combine(end_date, time.max).strftime("%Y-%m-%d %H:%M:%S")
-            if only_stock:
-                st.markdown("### 📊 所有物品库存"); st.dataframe(query_stock_only(keyword, category_filter), use_container_width=True, hide_index=True)
-            else:
-                st.markdown("### 📊 当前库存"); st.dataframe(query_stock(keyword, category_filter), use_container_width=True, hide_index=True)
-                st.markdown("### 📈 期间汇总"); st.dataframe(query_summary(keyword, start_dt, end_dt, category_filter), use_container_width=True, hide_index=True)
-                st.markdown("### 📋 出入库明细"); logs_df = query_logs(keyword, start_dt, end_dt, category_filter)
-                st.dataframe(logs_df, use_container_width=True, hide_index=True)
-                if not logs_df.empty: st.download_button("⬇️ 导出明细 CSV", logs_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"出入库明细_{start_date}_{end_date}.csv", mime="text/csv")
 
-# ---------- 按学期查询 ----------
+            if only_stock:
+                st.markdown("### 📊 所有物品库存")
+                st.dataframe(query_stock_only(keyword, category_filter), use_container_width=True, hide_index=True)
+            else:
+                st.markdown("### 📊 当前库存")
+                stock_df = query_stock(keyword, category_filter)
+                st.dataframe(stock_df, use_container_width=True, hide_index=True)
+
+                st.markdown("### 📈 期间汇总")
+                summary_df = query_summary(keyword, start_dt, end_dt, category_filter)
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+                st.markdown("### 📋 出入库明细")
+                logs_df = query_logs(keyword, start_dt, end_dt, category_filter)
+                st.dataframe(logs_df, use_container_width=True, hide_index=True)
+
+                if not logs_df.empty:
+                    st.divider()
+                    st.markdown("#### 📤 导出选中物资的出入库明细")
+
+                    all_items = sorted(logs_df["物品名称"].unique().tolist())
+
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        selected_items = st.multiselect("选择要导出的物资（可多选）", options=all_items, default=all_items, key="export_multi_items")
+                    with col_b:
+                        export_format = st.selectbox("导出格式", ["Excel (.xlsx)", "PDF (.pdf)"], key="multi_export_format")
+
+                    if st.button("🚀 生成并下载", type="primary", key="btn_multi_export"):
+                        if not selected_items:
+                            st.warning("请至少选择一种物资。")
+                        else:
+                            if export_format.startswith("Excel"):
+                                data = export_multi_items_excel(logs_df, selected_items)
+                                if data:
+                                    st.download_button("⬇️ 点击下载 Excel", data, file_name=f"物资出入库明细_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+                                    st.success("✅ Excel 已生成，每个物资一个 Sheet。")
+                                else:
+                                    st.error("没有可导出的数据。")
+                            else:
+                                data = export_multi_items_pdf(logs_df, selected_items)
+                                if data:
+                                    st.download_button("⬇️ 点击下载 PDF", data, file_name=f"物资出入库明细_{date.today()}.pdf", mime="application/pdf", type="primary")
+                                    st.success("✅ PDF 已生成，每个物资单独一页。")
+                                else:
+                                    st.error("没有可导出的数据。")
+
+                    st.divider()
+                    st.markdown("#### 📤 导出全部库存汇总")
+                    if st.button("📊 导出库存汇总表（Excel）", key="btn_export_stock_summary"):
+                        stock_export_df = _prepare_stock_df(keyword, category_filter)
+                        if stock_export_df.empty:
+                            st.warning("没有可导出的库存数据。")
+                        else:
+                            output = io.BytesIO()
+                            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                                stock_export_df.to_excel(writer, sheet_name="库存汇总", index=False)
+                            st.download_button("⬇️ 点击下载 Excel", output.getvalue(), file_name=f"物资库存汇总_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+
 if "📅 按学期查询" in tab_dict:
     with tab_dict["📅 按学期查询"]:
         st.subheader("按学期查询")
         semesters_df = get_semesters()
-        if semesters_df.empty: st.warning("还没有学期，请先到「学期管理」添加。")
+        if semesters_df.empty:
+            st.warning("还没有学期，请先到「学期管理」添加。")
         else:
             col1, col2, col3 = st.columns(3)
             with col1:
-                default_sem = get_default_semester(semesters_df); sem_list = semesters_df["学期名称"].tolist()
+                default_sem = get_default_semester(semesters_df)
+                sem_list = semesters_df["学期名称"].tolist()
                 default_idx = sem_list.index(default_sem) if default_sem in sem_list else 0
                 sem_name = st.selectbox("选择学期", sem_list, index=default_idx)
-            with col2: keyword2 = st.text_input("物品名称关键词（可选）", "", key="kw_sem")
-            with col3: category_filter2 = st.selectbox("类别筛选", ["全部"] + CATEGORIES, key="cat_sem")
+            with col2:
+                keyword2 = st.text_input("物品名称关键词（可选）", "", key="kw_sem")
+            with col3:
+                category_filter2 = st.selectbox("类别筛选", ["全部"] + CATEGORIES, key="cat_sem")
             row = semesters_df[semesters_df["学期名称"] == sem_name].iloc[0]
-            start_dt = f"{row['开始日期']} 00:00:00"; end_dt = f"{row['结束日期']} 23:59:59"
+            start_dt = f"{row['开始日期']} 00:00:00"
+            end_dt = f"{row['结束日期']} 23:59:59"
             st.caption(f"📅 学期区间：{row['开始日期']} ～ {row['结束日期']}")
             if st.button("查询学期数据", type="primary", key="btn_sem"):
                 summary_df = query_summary(keyword2, start_dt, end_dt, category_filter2)
                 if not summary_df.empty:
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("物品种类数", len(summary_df)); c2.metric("学期入库总量", f"{summary_df['期间入库'].sum():.0f}")
-                    c3.metric("学期出库总量", f"{summary_df['期间出库'].sum():.0f}"); c4.metric("期末库存总量", f"{summary_df['期末库存'].sum():.0f}")
-                st.markdown("### 📊 学期库存汇总"); st.dataframe(summary_df, use_container_width=True, hide_index=True)
-                st.markdown("### 🏆 学期消耗排行（出库 Top 10）"); st.dataframe(query_ranking(start_dt, end_dt, 10), use_container_width=True, hide_index=True)
-                st.markdown("### 📋 学期出入库明细"); st.dataframe(query_logs(keyword2, start_dt, end_dt, category_filter2), use_container_width=True, hide_index=True)
-                if not summary_df.empty: st.download_button("⬇️ 导出学期汇总 CSV", summary_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"{sem_name}_库存汇总.csv", mime="text/csv")
+                    c1.metric("物品种类数", len(summary_df))
+                    c2.metric("学期入库总量", f"{summary_df['期间入库'].sum():.0f}")
+                    c3.metric("学期出库总量", f"{summary_df['期间出库'].sum():.0f}")
+                    c4.metric("期末库存总量", f"{summary_df['期末库存'].sum():.0f}")
+                st.markdown("### 📊 学期库存汇总")
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                st.markdown("### 🏆 学期消耗排行（出库 Top 10）")
+                st.dataframe(query_ranking(start_dt, end_dt, 10), use_container_width=True, hide_index=True)
+                st.markdown("### 📋 学期出入库明细")
+                st.dataframe(query_logs(keyword2, start_dt, end_dt, category_filter2), use_container_width=True, hide_index=True)
+                if not summary_df.empty:
+                    st.download_button("⬇️ 导出学期汇总 CSV", summary_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"{sem_name}_库存汇总.csv", mime="text/csv")
 
-# ---------- 学期管理 ----------
+
 if "⚙️ 学期管理" in tab_dict:
     with tab_dict["⚙️ 学期管理"]:
-        st.subheader("学期管理"); st.markdown("##### 现有学期"); semesters_df = get_semesters()
+        st.subheader("学期管理")
+        st.markdown("##### 现有学期")
+        semesters_df = get_semesters()
         st.dataframe(semesters_df, use_container_width=True, hide_index=True)
         st.markdown("##### 添加学期")
         with st.form("sem_form", clear_on_submit=True):
             col1, col2, col3 = st.columns(3)
-            with col1: new_name = st.text_input("学期名称 *", placeholder="如 2026-2027学年第一学期")
-            with col2: new_start = st.date_input("开始日期 *")
-            with col3: new_end = st.date_input("结束日期 *")
+            with col1:
+                new_name = st.text_input("学期名称 *", placeholder="如 2026-2027学年第一学期")
+            with col2:
+                new_start = st.date_input("开始日期 *")
+            with col3:
+                new_end = st.date_input("结束日期 *")
             if st.form_submit_button("添加", type="primary"):
-                if not new_name.strip(): st.error("学期名称不能为空")
-                elif new_start > new_end: st.error("开始日期不能晚于结束日期")
+                if not new_name.strip():
+                    st.error("学期名称不能为空")
+                elif new_start > new_end:
+                    st.error("开始日期不能晚于结束日期")
                 else:
                     ok, msg = add_semester(new_name.strip(), new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"))
-                    if ok: st.success(msg); st.rerun()
-                    else: st.error(msg)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
         st.markdown("##### 删除学期")
         if not semesters_df.empty:
             col1, col2 = st.columns([3, 1])
-            with col1: del_name = st.selectbox("选择要删除的学期", semesters_df["学期名称"].tolist())
+            with col1:
+                del_name = st.selectbox("选择要删除的学期", semesters_df["学期名称"].tolist())
             with col2:
-                st.write(""); st.write("")
+                st.write("")
+                st.write("")
                 if st.button("删除"):
-                    sid = int(semesters_df[semesters_df["学期名称"] == del_name]["id"].iloc[0]); delete_semester(sid)
-                    st.success(f"已删除：{del_name}"); st.rerun()
+                    sid = int(semesters_df[semesters_df["学期名称"] == del_name]["id"].iloc[0])
+                    delete_semester(sid)
+                    st.success(f"已删除：{del_name}")
+                    st.rerun()
 
-# ---------- 预警设置 ----------
+
 if "🔔 预警设置" in tab_dict:
     with tab_dict["🔔 预警设置"]:
-        st.subheader("🔔 库存预警设置"); st.caption("为物品设置最低库存量。低于该值时，库存表会标注「⚠️ 库存不足」。")
-        st.markdown("##### 当前预警列表"); alerts_df = get_alerts()
-        if alerts_df.empty: st.info("还没有设置任何预警。可在下方添加。")
-        else: st.dataframe(alerts_df, use_container_width=True, hide_index=True)
-        st.markdown("##### 添加 / 修改预警"); items = get_all_items()
+        st.subheader("🔔 库存预警设置")
+        st.caption("为物品设置最低库存量。低于该值时，库存表会标注「⚠️ 库存不足」。")
+        st.markdown("##### 当前预警列表")
+        alerts_df = get_alerts()
+        if alerts_df.empty:
+            st.info("还没有设置任何预警。可在下方添加。")
+        else:
+            st.dataframe(alerts_df, use_container_width=True, hide_index=True)
+        st.markdown("##### 添加 / 修改预警")
+        items = get_all_items()
         col1, col2 = st.columns(2)
-        with col1: alert_mode = st.radio("选择物品方式", ["从已有物品选择", "手动输入物品名称"], horizontal=True)
+        with col1:
+            alert_mode = st.radio("选择物品方式", ["从已有物品选择", "手动输入物品名称"], horizontal=True)
         with col2:
-            if alert_mode == "从已有物品选择" and items: alert_item = st.selectbox("选择物品", items)
-            else: alert_item = st.text_input("物品名称")
+            if alert_mode == "从已有物品选择" and items:
+                alert_item = st.selectbox("选择物品", items)
+            else:
+                alert_item = st.text_input("物品名称")
         alert_qty = st.number_input("最低库存阈值", min_value=0, step=1, value=0, format="%d")
         if st.button("💾 保存预警", type="primary"):
-            if not alert_item or not alert_item.strip(): st.error("请先选择或输入物品名称")
-            else: set_alert(alert_item.strip(), alert_qty); st.success(f"已设置：【{alert_item}】最低库存 {alert_qty}"); st.rerun()
+            if not alert_item or not alert_item.strip():
+                st.error("请先选择或输入物品名称")
+            else:
+                set_alert(alert_item.strip(), alert_qty)
+                st.success(f"已设置：【{alert_item}】最低库存 {alert_qty}")
+                st.rerun()
         st.markdown("##### 删除预警")
         if not alerts_df.empty:
             col1, col2 = st.columns([3, 1])
-            with col1: del_alert = st.selectbox("选择要删除预警的物品", alerts_df["物品名称"].tolist())
+            with col1:
+                del_alert = st.selectbox("选择要删除预警的物品", alerts_df["物品名称"].tolist())
             with col2:
-                st.write(""); st.write("")
-                if st.button("删除预警"): delete_alert(del_alert); st.success(f"已删除预警：{del_alert}"); st.rerun()
+                st.write("")
+                st.write("")
+                if st.button("删除预警"):
+                    delete_alert(del_alert)
+                    st.success(f"已删除预警：{del_alert}")
+                    st.rerun()
 
-# ---------- 导出数据 ----------
-if "📤 导出数据" in tab_dict:
-    with tab_dict["📤 导出数据"]:
-        st.subheader("📤 一键导出"); st.caption("导出所有物品的库存数据；可选附带出入库记录。")
-        col1, col2, col3 = st.columns(3)
-        with col1: exp_keyword = st.text_input("物品名称关键词（可选）", "", key="exp_kw")
-        with col2: exp_category = st.selectbox("类别筛选", ["全部"] + CATEGORIES, key="exp_cat")
-        with col3: exp_format = st.selectbox("导出格式", ["Excel (.xlsx)", "PDF (.pdf)"])
-        include_logs = st.checkbox("📋 同时导出出入库记录（需选择时间范围）", value=False)
-        exp_start_date = exp_end_date = None
-        if include_logs:
-            col1, col2 = st.columns(2)
-            with col1: exp_start_date = st.date_input("记录开始日期", value=date.today().replace(day=1), key="exp_start")
-            with col2: exp_end_date = st.date_input("记录结束日期", value=date.today(), key="exp_end")
-        st.divider(); preview_df = _prepare_stock_df(exp_keyword, exp_category); st.markdown("##### 库存数据预览")
-        if preview_df.empty: st.info("没有可导出的数据。")
-        else: st.dataframe(preview_df, use_container_width=True, hide_index=True); st.caption(f"共 {len(preview_df)} 种物品")
-        if st.button("🚀 生成并下载", type="primary"):
-            if preview_df.empty: st.error("当前没有可导出的库存数据。")
-            else:
-                log_start = log_end = None
-                if include_logs and exp_start_date and exp_end_date:
-                    log_start = datetime.combine(exp_start_date, time.min).strftime("%Y-%m-%d %H:%M:%S")
-                    log_end = datetime.combine(exp_end_date, time.max).strftime("%Y-%m-%d %H:%M:%S")
-                try:
-                    if exp_format.startswith("Excel"):
-                        data = export_to_excel(exp_keyword, exp_category, include_logs, log_start, log_end)
-                        if data is None: st.error("没有可导出的数据。")
-                        else: st.download_button("⬇️ 点击下载 Excel", data, file_name=f"物资库存_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary"); st.success("✅ Excel 已生成。")
-                    else:
-                        data = export_to_pdf(exp_keyword, exp_category, include_logs, log_start, log_end)
-                        if data is None: st.error("没有可导出的数据。")
-                        else: st.download_button("⬇️ 点击下载 PDF", data, file_name=f"物资库存_{date.today()}.pdf", mime="application/pdf", type="primary"); st.success("✅ PDF 已生成。")
-                except Exception as e: st.error(f"导出失败：{e}")
 
-# ---------- 用户管理 ----------
 if "👥 用户管理" in tab_dict:
     with tab_dict["👥 用户管理"]:
         st.subheader("👥 用户管理")
         st.caption("三种角色：**Operator**（录入、查询、导出）、**普通 Admin**（唯一，可转让）、**永久 Admin**（可多个，不被降级）。")
 
-        conn = get_conn(); cur = conn.cursor()
+        conn = get_conn()
+        cur = conn.cursor()
         cur.execute("SELECT is_permanent_admin FROM app_users WHERE email = %s", (st.session_state.user,))
         _op_row = cur.fetchone()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         i_am_permanent = _op_row[0] if _op_row else False
 
         st.markdown("##### 🔎 搜索用户")
         search_kw = st.text_input("按 姓名 / 学号 / 邮箱 搜索", "", key="user_search", placeholder="输入姓名、学号或邮箱的一部分即可")
         users_df = list_users(search_kw)
         st.markdown("##### 📋 用户列表")
-        if users_df.empty: st.info("没有匹配的用户。")
-        else: st.dataframe(users_df, use_container_width=True, hide_index=True); st.caption(f"共 {len(users_df)} 位用户")
+        if users_df.empty:
+            st.info("没有匹配的用户。")
+        else:
+            st.dataframe(users_df, use_container_width=True, hide_index=True)
+            st.caption(f"共 {len(users_df)} 位用户")
 
         st.divider()
         st.markdown("##### ➕ 添加新用户")
         st.caption("新增用户默认是 Operator，初始密码统一为 123456。")
         with st.form("add_user_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
-            with col1: new_name = st.text_input("姓名 *"); new_email = st.text_input("邮箱 *")
-            with col2: new_student_id = st.text_input("学号 *")
+            with col1:
+                new_name = st.text_input("姓名 *")
+                new_email = st.text_input("邮箱 *")
+            with col2:
+                new_student_id = st.text_input("学号 *")
             if st.form_submit_button("添加用户", type="primary"):
                 errors = []
-                if not new_name or not new_name.strip(): errors.append("姓名不能为空")
-                if not new_student_id or not new_student_id.strip(): errors.append("学号不能为空")
-                if not new_email or not new_email.strip(): errors.append("邮箱不能为空")
+                if not new_name or not new_name.strip():
+                    errors.append("姓名不能为空")
+                if not new_student_id or not new_student_id.strip():
+                    errors.append("学号不能为空")
+                if not new_email or not new_email.strip():
+                    errors.append("邮箱不能为空")
                 if errors:
-                    for e in errors: st.error(e)
+                    for e in errors:
+                        st.error(e)
                 else:
                     ok, msg = create_user(new_email.strip(), new_name.strip(), new_student_id.strip())
-                    if ok: st.success(f"已添加：{new_name}（{new_student_id}）- {new_email}。{msg}"); st.rerun()
-                    else: st.error(msg)
+                    if ok:
+                        st.success(f"已添加：{new_name}（{new_student_id}）- {new_email}。{msg}")
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
         if i_am_permanent:
             st.divider()
@@ -924,25 +1118,33 @@ if "👥 用户管理" in tab_dict:
                     if not is_perm_now:
                         if st.button("⭐ 设为永久 Admin"):
                             ok, msg = set_permanent_admin(target_email, True)
-                            if ok: st.success(msg); st.rerun()
-                            else: st.error(msg)
+                            if ok:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
                     else:
                         st.info("该用户已是永久 Admin")
                 with col2:
                     if is_perm_now:
                         if st.button("🚫 取消永久 Admin 标记"):
                             ok, msg = set_permanent_admin(target_email, False)
-                            if ok: st.success(msg); st.rerun()
-                            else: st.error(msg)
+                            if ok:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
 
         if i_am_permanent:
             st.divider()
             st.markdown("##### 👤 设置普通 Admin")
             st.caption("普通 Admin 在整个系统中**只能有一个**。如果指定新的人选，原来的普通 Admin 会自动降级为 Operator。永久 Admin 不受影响。")
-            conn = get_conn(); cur = conn.cursor()
+            conn = get_conn()
+            cur = conn.cursor()
             cur.execute("SELECT email, name FROM app_users WHERE role = 'admin' AND is_permanent_admin = FALSE LIMIT 1")
             current_normal_admin = cur.fetchone()
-            cur.close(); conn.close()
+            cur.close()
+            conn.close()
             if current_normal_admin:
                 st.info(f"当前普通 Admin：{current_normal_admin[1] or '未填姓名'}（{current_normal_admin[0]}）")
             else:
@@ -960,8 +1162,11 @@ if "👥 用户管理" in tab_dict:
                 target_email_na = candidates_na.iloc[display_na.index(selected_na)]["邮箱"]
                 if st.button("👤 设为普通 Admin", type="primary"):
                     ok, msg = set_normal_admin(target_email_na)
-                    if ok: st.success(msg); st.rerun()
-                    else: st.error(msg)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
         st.divider()
         st.markdown("##### 🔁 转让普通 Admin 权限")
@@ -969,8 +1174,10 @@ if "👥 用户管理" in tab_dict:
         if i_am_permanent:
             st.info("您是永久 Admin，无需转让权限。")
         else:
-            other_users_df = list_users(""); other_users_df = other_users_df[other_users_df["角色"] != "admin"].copy()
-            if other_users_df.empty: st.info("暂无其他用户可接收 Admin 权限。")
+            other_users_df = list_users("")
+            other_users_df = other_users_df[other_users_df["角色"] != "admin"].copy()
+            if other_users_df.empty:
+                st.info("暂无其他用户可接收 Admin 权限。")
             else:
                 transfer_search = st.text_input("搜索接收者（姓名 / 学号 / 邮箱）", "", key="transfer_search", placeholder="输入关键词筛选")
                 filtered_transfer = other_users_df
@@ -980,19 +1187,25 @@ if "👥 用户管理" in tab_dict:
                             filtered_transfer["学号"].astype(str).str.contains(kw, case=False, na=False) |
                             filtered_transfer["邮箱"].astype(str).str.contains(kw, case=False, na=False))
                     filtered_transfer = filtered_transfer[mask]
-                if filtered_transfer.empty: st.warning("没有匹配的用户。")
+                if filtered_transfer.empty:
+                    st.warning("没有匹配的用户。")
                 else:
                     display_list = [f"{r['姓名'] or '未填'}（{r['学号'] or '未填'}）- {r['邮箱']}" for _, r in filtered_transfer.iterrows()]
                     selected_display = st.selectbox("选择接收者", display_list, key="transfer_target")
                     transfer_email = filtered_transfer.iloc[display_list.index(selected_display)]["邮箱"]
                     if st.button("确认转让", type="primary"):
                         ok, msg = transfer_admin(st.session_state.user, transfer_email)
-                        if ok: st.success(msg); st.session_state.role = "operator"; st.rerun()
-                        else: st.error(msg)
+                        if ok:
+                            st.success(msg)
+                            st.session_state.role = "operator"
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
         st.divider()
         st.markdown("##### 🔧 重置密码 / 删除用户")
-        if users_df.empty: st.info("请先在搜索框里找到目标用户。")
+        if users_df.empty:
+            st.info("请先在搜索框里找到目标用户。")
         else:
             display_list2 = [f"{r['姓名'] or '未填'}（{r['学号'] or '未填'}）- {r['邮箱']}" for _, r in users_df.iterrows()]
             selected_user_display = st.selectbox("选择用户", display_list2, key="target_user")
@@ -1006,18 +1219,27 @@ if "👥 用户管理" in tab_dict:
                     st.success(f"已重置 {target_email} 的密码为 123456，该用户还可自行修改 1 次。")
             with col2:
                 if st.button("🗑️ 删除该用户"):
-                    if target_email == st.session_state.user: st.error("不能删除自己")
-                    elif target_is_perm: st.error("不能删除永久 Admin")
-                    elif target_role == "admin" and not i_am_permanent: st.error("不能删除管理员账号，请先转让 Admin 权限")
-                    else: delete_user(target_email); st.success(f"已删除：{target_email}"); st.rerun()
+                    if target_email == st.session_state.user:
+                        st.error("不能删除自己")
+                    elif target_is_perm:
+                        st.error("不能删除永久 Admin")
+                    elif target_role == "admin" and not i_am_permanent:
+                        st.error("不能删除管理员账号，请先转让 Admin 权限")
+                    else:
+                        delete_user(target_email)
+                        st.success(f"已删除：{target_email}")
+                        st.rerun()
 
-# ---------- 修改密码 ----------
+
 if "🔑 修改密码" in tab_dict:
     with tab_dict["🔑 修改密码"]:
         st.subheader("🔑 修改我的密码")
-        conn = get_conn(); cur = conn.cursor()
+        conn = get_conn()
+        cur = conn.cursor()
         cur.execute("SELECT password_change_count FROM app_users WHERE email = %s", (st.session_state.user,))
-        cnt_row = cur.fetchone(); cur.close(); conn.close()
+        cnt_row = cur.fetchone()
+        cur.close()
+        conn.close()
         change_count = cnt_row[0] if cnt_row else 0
         if change_count >= 2:
             st.warning("⚠️ 您已经修改过 2 次密码，不能再自行修改。如需再次修改，请联系管理员重置密码（重置后密码将变回 123456）。")
@@ -1025,20 +1247,33 @@ if "🔑 修改密码" in tab_dict:
             st.caption(f"您还可以修改 {2 - change_count} 次密码（无需验证旧密码，只需核对身份信息）。")
             with st.form("change_pwd_form"):
                 st.markdown("##### 1. 身份信息核验")
+                st.caption("请手动输入你自己的邮箱、姓名和学号，系统会与数据库记录比对。")
                 col1, col2, col3 = st.columns(3)
-                with col1: input_email = st.text_input("邮箱 *", value=st.session_state.user)
-                with col2: input_name = st.text_input("姓名 *", value=st.session_state.name or "")
-                with col3: input_student_id = st.text_input("学号 *", value=st.session_state.student_id or "")
+                with col1:
+                    input_email = st.text_input("邮箱 *")
+                with col2:
+                    input_name = st.text_input("姓名 *")
+                with col3:
+                    input_student_id = st.text_input("学号 *")
                 st.divider()
                 st.markdown("##### 2. 设置新密码")
                 col4, col5 = st.columns(2)
-                with col4: new_pwd = st.text_input("新密码 *", type="password")
-                with col5: confirm_pwd = st.text_input("确认新密码 *", type="password")
+                with col4:
+                    new_pwd = st.text_input("新密码 *", type="password")
+                with col5:
+                    confirm_pwd = st.text_input("确认新密码 *", type="password")
                 if st.form_submit_button("确认修改", type="primary"):
-                    if not all([input_email, input_name, input_student_id, new_pwd, confirm_pwd]): st.error("所有字段都必须填写")
-                    elif new_pwd != confirm_pwd: st.error("两次输入的新密码不一致")
-                    elif len(new_pwd) < 6: st.error("新密码长度不能少于 6 位")
+                    if not all([input_email, input_name, input_student_id, new_pwd, confirm_pwd]):
+                        st.error("所有字段都必须填写")
+                    elif new_pwd != confirm_pwd:
+                        st.error("两次输入的新密码不一致")
+                    elif len(new_pwd) < 6:
+                        st.error("新密码长度不能少于 6 位")
                     else:
                         ok, msg = change_user_password(st.session_state.user, input_email, input_name, input_student_id, new_pwd)
-                        if ok: st.success(msg); st.info("下次登录请使用新密码。"); st.rerun()
-                        else: st.error(msg)
+                        if ok:
+                            st.success(msg)
+                            st.info("下次登录请使用新密码。")
+                            st.rerun()
+                        else:
+                            st.error(msg)
