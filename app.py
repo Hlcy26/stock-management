@@ -622,19 +622,35 @@ def export_multi_items_pdf(detail_df, selected_items):
 
 
 def render_user_table(df):
-    display_df = df[["邮箱", "姓名", "学号", "创建时间"]].copy()
-
-    def role_display(row):
-        email = row["邮箱"]
-        if df[df["邮箱"] == email]["永久Admin"].iloc[0]:
-            return "Admin"
-        role = df[df["邮箱"] == email]["角色"].iloc[0]
-        if role == "admin":
-            return "Admin"
-        return "Operator"
-
-    display_df.insert(3, "身份", df.apply(role_display, axis=1))
-
+    html = '<table style="width:100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px;">'
+    html += '<thead><tr style="background-color:#4A6FA5; color:white;">'
+    for col in ["邮箱", "姓名", "学号", "身份", "创建时间"]:
+        html += f'<th style="padding:10px; text-align:left; border:1px solid #ddd;">{col}</th>'
+    html += '</tr></thead><tbody>'
+    for _, row in df.iterrows():
+        is_perm = bool(row["永久Admin"])
+        role = row["角色"]
+        if is_perm or role == "admin":
+            role_text = "Admin"
+            role_style = "color:#DAA520; font-weight:bold;"
+        else:
+            role_text = "Operator"
+            role_style = ""
+        row_style = "background-color:#FFF8DC;" if is_perm else ""
+        email_v = row["邮箱"] or ""
+        name_v = row["姓名"] or ""
+        sid_v = row["学号"] or ""
+        ctime_v = str(row["创建时间"]) if row["创建时间"] is not None else ""
+        html += f'<tr style="{row_style}">'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{email_v}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{name_v}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{sid_v}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd; {role_style}">{role_text}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{ctime_v}</td>'
+        html += '</tr>'
+    html += '</tbody></table>'
+    return html
+    
     def style_role(val):
         if val == "Admin":
             email = None
@@ -1138,11 +1154,10 @@ if "👥 用户管理" in tab_dict:
         search_kw = st.text_input("按 姓名 / 学号 / 邮箱 搜索", "", key="user_search", placeholder="输入姓名、学号或邮箱的一部分即可")
         users_df = list_users(search_kw)
         st.markdown("##### 📋 用户列表")
-        if users_df.empty:
+              if users_df.empty:
             st.info("没有匹配的用户。")
         else:
-            styled = render_user_table(users_df)
-            st.dataframe(styled, use_container_width=True, hide_index=True)
+            st.markdown(render_user_table(users_df), unsafe_allow_html=True)
             st.caption(f"共 {len(users_df)} 位用户")
 
         st.divider()
