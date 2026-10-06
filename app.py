@@ -109,6 +109,56 @@ except Exception as e:
     st.stop()
 
 
+def get_normal_admin_name():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT name, email FROM app_users WHERE role = 'admin' AND is_permanent_admin = FALSE LIMIT 1")
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row:
+        if row[0]:
+            return row[0]
+        else:
+            return row[1]
+    return None
+
+
+def render_contact_html():
+    admin_name = get_normal_admin_name()
+    if admin_name:
+        text = (
+            f'有问题咨询 <strong>{admin_name}</strong>，如 <strong>{admin_name}</strong> 无法解决，'
+            f'请联系牢大，QQ：1018833924'
+        )
+        return f'<p style="color:#1E90FF; font-size:15px; font-weight:bold;">{text}</p>'
+    else:
+        line1 = '请联系牢大，QQ：1018833924'
+        line2 = '并提醒牢大给负责的部长设置为Admin'
+        return (
+            f'<p style="color:#1E90FF; font-size:15px; font-weight:bold; margin:0;">{line1}</p>'
+            f'<p style="color:#1E90FF; font-size:18px; font-weight:bold; margin:4px 0 0 0;">{line2}</p>'
+        )
+
+
+def render_forgot_password_html():
+    admin_name = get_normal_admin_name()
+    if admin_name:
+        line1 = f'如忘记你的密码，请联系 <strong>{admin_name}</strong> 重置密码'
+        line2 = f'如 <strong>{admin_name}</strong> 无法解决，请联系牢大，QQ：1018833924'
+        return (
+            f'{line1}<br>'
+            f'<span style="color:#1E90FF; font-size:12px;">{line2}</span>'
+        )
+    else:
+        line1 = '请联系牢大，QQ：1018833924'
+        line2 = '并提醒牢大给负责的部长设置为Admin'
+        return (
+            f'<p style="color:#1E90FF; font-size:15px; font-weight:bold; margin:0;">{line1}</p>'
+            f'<p style="color:#1E90FF; font-size:18px; font-weight:bold; margin:4px 0 0 0;">{line2}</p>'
+        )
+
+
 def get_user(identifier):
     conn = get_conn()
     cur = conn.cursor()
@@ -665,12 +715,7 @@ if st.session_state.user is None:
 
     with auth_tab1:
         st.subheader("请登录")
-        st.markdown(
-            '<p style="color:#E63946; font-size:15px; font-weight:bold;">'
-            '有问题咨询（普通Admin），如（普通Admin）无法解决，请联系牢大，QQ：1018833924'
-            '</p>',
-            unsafe_allow_html=True
-        )
+        st.markdown(render_contact_html(), unsafe_allow_html=True)
         with st.form("login_form"):
             identifier = st.text_input("邮箱或学号")
             password = st.text_input("密码", type="password")
@@ -690,13 +735,7 @@ if st.session_state.user is None:
 
     with auth_tab2:
         st.subheader("🔑 更改密码")
-        st.markdown(
-            '如忘记你的密码，请联系<strong>普通Admin</strong>重置密码<br>'
-            '<span style="color:#E63946; font-size:12px;">'
-            '如（普通Admin）无法解决，请联系牢大，QQ：1018833924'
-            '</span>',
-            unsafe_allow_html=True
-        )
+        st.markdown(render_forgot_password_html(), unsafe_allow_html=True)
 
         with st.form("change_pwd_guest_form"):
             st.markdown("##### 1. 身份信息")
@@ -1276,13 +1315,7 @@ if "👥 用户管理" in tab_dict:
 if "🔑 修改密码" in tab_dict:
     with tab_dict["🔑 修改密码"]:
         st.subheader("🔑 修改我的密码")
-        st.markdown(
-            '如忘记你的密码，请联系<strong>普通Admin</strong>重置密码<br>'
-            '<span style="color:#E63946; font-size:12px;">'
-            '如（普通Admin）无法解决，请联系牢大，QQ：1018833924'
-            '</span>',
-            unsafe_allow_html=True
-        )
+        st.markdown(render_forgot_password_html(), unsafe_allow_html=True)
 
         with st.form("change_pwd_form"):
             st.markdown("##### 1. 身份信息核验")
