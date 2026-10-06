@@ -2,6 +2,7 @@
 
 import io
 import os
+import uuid
 from datetime import datetime, date, time, timezone, timedelta
 
 import pandas as pd
@@ -40,9 +41,11 @@ def init_db():
             id SERIAL PRIMARY KEY, item_name TEXT NOT NULL, category TEXT DEFAULT '其他',
             change_type TEXT NOT NULL CHECK(change_type IN ('IN','OUT')),
             quantity REAL NOT NULL CHECK(quantity > 0), log_time TEXT NOT NULL,
-            note TEXT, operator TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            note TEXT, operator TEXT, batch_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("ALTER TABLE stock_log ADD COLUMN IF NOT EXISTS batch_id TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS semesters (
             id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE,
@@ -475,6 +478,7 @@ def parse_excel_import(file_bytes):
 def import_logs_from_parsed(rows, fixed_operator, fixed_date):
     success = 0
     errors = []
+    batch_id = uuid.uuid4().hex
     conn = get_conn()
     cur = conn.cursor()
     for r in rows:
@@ -491,15 +495,53 @@ def import_logs_from_parsed(rows, fixed_operator, fixed_date):
                 if stock < qty:
                     errors.append(f"{item} 库存不足，请确认后再输入！")
                     continue
-            cur.execute("INSERT INTO stock_log(item_name, category, change_type, quantity, log_time, note, operator) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                        (item, cat, change_type, qty, log_time, note_val, fixed_operator))
+            cur.execute(
+                "INSERT INTO stock_log(item_name, category, change_type, quantity, log_time, note, operator, batch_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (item, cat, change_type, qty, log_time, note_val, fixed_operator, batch_id)
+            )
             success += 1
         except Exception as e:
             errors.append(f"[{r['sheet']}] {r['category']}「{r['item_name']}」：{e}")
     conn.commit()
     cur.close()
     conn.close()
-    return success, errors
+    return success, errors, batch_id
+
+
+def undo_batch(batch_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM stock_log WHERE batch_id = %s", (batch_id,))
+    count = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return count
+
+
+def delete_log_by_id(log_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM stock_log WHERE id = %s", (log_id,))
+    count = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return count
+
+
+def list_all_logs(limit=200):
+    conn = get_conn()
+    df = pd.read_sql_query(f"""
+        SELECT id, log_time AS 时间, item_name AS 物品名称, category AS 类别,
+               CASE change_type WHEN 'IN' THEN '入库' ELSE '出库' END AS 类型,
+               quantity AS 数量, operator AS 操作人, note AS 备注,
+               batch_id AS 批次
+        FROM stock_log ORDER BY id DESC LIMIT {int(limit)}
+    """, conn)
+    conn.close()
+    return df
 
 
 def query_stock(keyword="", category="全部"):
@@ -810,6 +852,24 @@ if st.sidebar.button("退出登录"):
     st.session_state.student_id = None
     st.rerun()
 
+# ===== 全局：撤回导入按钮（3 分钟内有效） =====
+if "last_batch" in st.session_state and st.session_state.last_batch:
+    batch_info = st.session_state.last_batch
+    elapsed = (datetime.now() - batch_info["time"]).total_seconds()
+    if elapsed < 180:
+        remaining = int(180 - elapsed)
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            st.info(f"📥 您刚才导入了 {batch_info['count']} 条记录，可在 {remaining} 秒内撤回。")
+        with col_b:
+            if st.button("↩️ 撤回本次导入", type="primary", key="undo_batch_btn"):
+                count = undo_batch(batch_info["id"])
+                st.success(f"已撤回 {count} 条记录。")
+                st.session_state.last_batch = None
+                st.rerun()
+    else:
+        st.session_state.last_batch = None
+
 _alerts = get_alerts()
 if not _alerts.empty:
     _short = _alerts[_alerts["状态"] == "⚠️ 库存不足"]
@@ -892,7 +952,7 @@ if "📝 录入出入库" in tab_dict:
             3. 每个 Sheet 中，各类别按列分开（办公用品 / 活动物资 / 宣传用品 / 奖品/证书 / 借用物资 / 其他）
             4. 每个类别下有三列：**物品名称**、**数量**、**备注**
             5. 从第 3 行开始填写数据，数量填写正整数
-            6. 上传填好的 Excel 文件，确认导入
+            6. 上传填好的 Excel 文件，确认导入。导入后 3 分钟内可以撤回
             """)
 
             col_d1, col_d2 = st.columns([1, 2])
@@ -941,9 +1001,15 @@ if "📝 录入出入库" in tab_dict:
 
                         if st.button("✅ 确认导入", type="primary", key="btn_import"):
                             with st.spinner("导入中..."):
-                                success, errors = import_logs_from_parsed(rows, st.session_state.name, final_date)
+                                success, errors, batch_id = import_logs_from_parsed(rows, st.session_state.name, final_date)
                             if success > 0:
+                                st.session_state.last_batch = {
+                                    "id": batch_id,
+                                    "time": datetime.now(),
+                                    "count": success,
+                                }
                                 st.success(f"✅ 成功导入 {success} 条记录（操作人：{st.session_state.name}，日期：{final_date}）")
+                                st.info("⏱️ 3 分钟内可在页面顶部点击「撤回本次导入」撤销。")
                             if errors:
                                 with st.expander(f"⚠️ 有 {len(errors)} 条未导入，点击查看原因"):
                                     for e in errors:
@@ -1031,6 +1097,45 @@ if "🔍 查询与导出" in tab_dict:
                             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                                 stock_export_df.to_excel(writer, sheet_name="库存汇总", index=False)
                             st.download_button("⬇️ 点击下载 Excel", output.getvalue(), file_name=f"物资库存汇总_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+        # ===== Admin 删除任意记录（不限时间） =====
+        if st.session_state.role == "admin":
+            st.divider()
+            st.markdown("#### 🗑️ 删除记录（仅 Admin）")
+            st.caption("选择任意一条记录进行删除，不限时间。删除后不可恢复。")
+
+            all_logs_df = list_all_logs(limit=200)
+
+            if all_logs_df.empty:
+                st.info("暂无记录。")
+            else:
+                del_search = st.text_input("搜索物品名称（可选）", "", key="del_search", placeholder="输入物品名称关键词筛选")
+                filtered_logs = all_logs_df
+                if del_search.strip():
+                    filtered_logs = all_logs_df[all_logs_df["物品名称"].astype(str).str.contains(del_search.strip(), case=False, na=False)]
+
+                if filtered_logs.empty:
+                    st.warning("没有匹配的记录。")
+                else:
+                    st.dataframe(filtered_logs[["时间", "物品名称", "类别", "类型", "数量", "操作人", "备注"]], use_container_width=True, hide_index=True)
+                    st.caption(f"共 {len(filtered_logs)} 条记录（最多显示最近 200 条）")
+
+                    display_options = [
+                        f"[ID {row['id']}] {row['时间']} | {row['类型']} | {row['物品名称']} × {row['数量']} | 操作人：{row['操作人']}"
+                        for _, row in filtered_logs.iterrows()
+                    ]
+                    selected_log_display = st.selectbox("选择要删除的记录", display_options, key="del_log_select")
+                    selected_log_id = filtered_logs.iloc[display_options.index(selected_log_display)]["id"]
+
+                    col_d1, col_d2 = st.columns([1, 3])
+                    with col_d1:
+                        if st.button("🗑️ 删除该记录", type="primary", key="btn_delete_log"):
+                            count = delete_log_by_id(int(selected_log_id))
+                            if count > 0:
+                                st.success(f"已删除记录 ID {selected_log_id}。")
+                                st.rerun()
+                            else:
+                                st.error("删除失败，记录可能已被删除。")
 
 
 if "📅 按学期查询" in tab_dict:
