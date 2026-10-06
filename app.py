@@ -241,6 +241,37 @@ def list_users(keyword=""):
     return df
 
 
+def render_user_table(df):
+    html = '<table style="width:100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px;">'
+    html += '<thead><tr style="background-color:#4A6FA5; color:white;">'
+    for col in ["邮箱", "姓名", "学号", "身份", "创建时间"]:
+        html += f'<th style="padding:10px; text-align:left; border:1px solid #ddd;">{col}</th>'
+    html += '</tr></thead><tbody>'
+    for _, row in df.iterrows():
+        is_perm = bool(row["永久Admin"])
+        role = row["角色"]
+        if is_perm or role == "admin":
+            role_text = "Admin"
+            role_style = "color:#DAA520; font-weight:bold;"
+        else:
+            role_text = "Operator"
+            role_style = ""
+        row_style = "background-color:#FFF8DC;" if is_perm else ""
+        email_v = row["邮箱"] or ""
+        name_v = row["姓名"] or ""
+        sid_v = row["学号"] or ""
+        ctime_v = str(row["创建时间"]) if row["创建时间"] is not None else ""
+        html += f'<tr style="{row_style}">'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{email_v}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{name_v}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{sid_v}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd; {role_style}">{role_text}</td>'
+        html += f'<td style="padding:8px; border:1px solid #ddd;">{ctime_v}</td>'
+        html += '</tr>'
+    html += '</tbody></table>'
+    return html
+
+
 def change_user_password(current_login_email, input_email, input_name, input_student_id, old_password, new_password):
     conn = get_conn()
     cur = conn.cursor()
@@ -621,59 +652,6 @@ def export_multi_items_pdf(detail_df, selected_items):
     return buffer.getvalue()
 
 
-def render_user_table(df):
-    html = '<table style="width:100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px;">'
-    html += '<thead><tr style="background-color:#4A6FA5; color:white;">'
-    for col in ["邮箱", "姓名", "学号", "身份", "创建时间"]:
-        html += f'<th style="padding:10px; text-align:left; border:1px solid #ddd;">{col}</th>'
-    html += '</tr></thead><tbody>'
-    for _, row in df.iterrows():
-        is_perm = bool(row["永久Admin"])
-        role = row["角色"]
-        if is_perm or role == "admin":
-            role_text = "Admin"
-            role_style = "color:#DAA520; font-weight:bold;"
-        else:
-            role_text = "Operator"
-            role_style = ""
-        row_style = "background-color:#FFF8DC;" if is_perm else ""
-        email_v = row["邮箱"] or ""
-        name_v = row["姓名"] or ""
-        sid_v = row["学号"] or ""
-        ctime_v = str(row["创建时间"]) if row["创建时间"] is not None else ""
-        html += f'<tr style="{row_style}">'
-        html += f'<td style="padding:8px; border:1px solid #ddd;">{email_v}</td>'
-        html += f'<td style="padding:8px; border:1px solid #ddd;">{name_v}</td>'
-        html += f'<td style="padding:8px; border:1px solid #ddd;">{sid_v}</td>'
-        html += f'<td style="padding:8px; border:1px solid #ddd; {role_style}">{role_text}</td>'
-        html += f'<td style="padding:8px; border:1px solid #ddd;">{ctime_v}</td>'
-        html += '</tr>'
-    html += '</tbody></table>'
-    return html
-    
-    def style_role(val):
-        if val == "Admin":
-            email = None
-            for _, r in df.iterrows():
-                if r["永久Admin"]:
-                    email = r["邮箱"]
-                    break
-            return "color: #DAA520; font-weight: bold;"
-        return ""
-
-    styled = display_df.style.applymap(style_role, subset=["身份"])
-
-    perm_emails = set(df[df["永久Admin"]]["邮箱"].tolist())
-
-    def row_style(row):
-        if row["邮箱"] in perm_emails:
-            return ["background-color: #FFF8DC; color: #B8860B; font-weight: bold;"] * len(row)
-        return [""] * len(row)
-
-    styled = display_df.style.apply(row_style, axis=1)
-    return styled
-
-
 if "user" not in st.session_state:
     st.session_state.user = None
     st.session_state.role = None
@@ -687,6 +665,12 @@ if st.session_state.user is None:
 
     with auth_tab1:
         st.subheader("请登录")
+        st.markdown(
+            '<p style="color:#E63946; font-size:15px; font-weight:bold;">'
+            '有问题咨询（普通Admin），如（普通Admin）无法解决，请联系牢大，QQ：1018833924'
+            '</p>',
+            unsafe_allow_html=True
+        )
         with st.form("login_form"):
             identifier = st.text_input("邮箱或学号")
             password = st.text_input("密码", type="password")
@@ -706,7 +690,13 @@ if st.session_state.user is None:
 
     with auth_tab2:
         st.subheader("🔑 更改密码")
-        st.caption("无需登录。请填写你的姓名、学号、邮箱，并验证旧密码。忘记密码请联系管理员重置。")
+        st.markdown(
+            '如忘记你的密码，请联系<strong>普通Admin</strong>重置密码<br>'
+            '<span style="color:#E63946; font-size:12px;">'
+            '如（普通Admin）无法解决，请联系牢大，QQ：1018833924'
+            '</span>',
+            unsafe_allow_html=True
+        )
 
         with st.form("change_pwd_guest_form"):
             st.markdown("##### 1. 身份信息")
@@ -1154,7 +1144,7 @@ if "👥 用户管理" in tab_dict:
         search_kw = st.text_input("按 姓名 / 学号 / 邮箱 搜索", "", key="user_search", placeholder="输入姓名、学号或邮箱的一部分即可")
         users_df = list_users(search_kw)
         st.markdown("##### 📋 用户列表")
-              if users_df.empty:
+        if users_df.empty:
             st.info("没有匹配的用户。")
         else:
             st.markdown(render_user_table(users_df), unsafe_allow_html=True)
@@ -1286,7 +1276,13 @@ if "👥 用户管理" in tab_dict:
 if "🔑 修改密码" in tab_dict:
     with tab_dict["🔑 修改密码"]:
         st.subheader("🔑 修改我的密码")
-        st.caption("请核对身份信息并验证旧密码。忘记密码请联系管理员重置。")
+        st.markdown(
+            '如忘记你的密码，请联系<strong>普通Admin</strong>重置密码<br>'
+            '<span style="color:#E63946; font-size:12px;">'
+            '如（普通Admin）无法解决，请联系牢大，QQ：1018833924'
+            '</span>',
+            unsafe_allow_html=True
+        )
 
         with st.form("change_pwd_form"):
             st.markdown("##### 1. 身份信息核验")
