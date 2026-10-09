@@ -16,11 +16,7 @@ import extra_streamlit_components as stx
 
 st.set_page_config(page_title="团委学生会物资管理", layout="wide")
 
-@st.cache_resource
-def get_cookie_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_cookie_manager()
+cookie_manager = stx.CookieManager(key="stock_cookie_manager")
 COOKIE_NAME = "stock_login_email"
 COOKIE_DAYS = 30
 
