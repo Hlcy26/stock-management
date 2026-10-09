@@ -4,7 +4,6 @@ import io
 import os
 import base64
 import uuid
-import urllib.parse
 from datetime import datetime, date, time, timezone, timedelta
 
 import pandas as pd
@@ -114,14 +113,16 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
-if "selected_photo_item" not in st.session_state:
-    st.session_state["selected_photo_item"] = None
+
 
 try:
     init_db()
 except Exception as e:
     st.error(f"数据库初始化失败：{e}")
     st.stop()
+
+if "selected_photo_item" not in st.session_state:
+    st.session_state["selected_photo_item"] = None
 
 
 # ==================== 照片相关 ====================
@@ -201,7 +202,6 @@ def delete_item_photo(item_name):
 
 
 def get_recent_logs(item_name, limit=3):
-    """获取某物资最近 N 条出入库记录"""
     conn = get_conn()
     df = pd.read_sql_query("""
         SELECT log_time AS 时间,
@@ -216,6 +216,7 @@ def get_recent_logs(item_name, limit=3):
     """, conn, params=(item_name, limit))
     conn.close()
     return df
+
 
 def render_photo_wall(items_with_photos, key_prefix="wall"):
     if not items_with_photos:
@@ -234,7 +235,8 @@ def render_photo_wall(items_with_photos, key_prefix="wall"):
             if st.button("🔍 查看详情", key=f"{key_prefix}_view_{idx}", use_container_width=True):
                 st.session_state["selected_photo_item"] = item_name
                 st.rerun()
-    
+
+
 # ==================== 用户管理 ====================
 def get_normal_admin_name():
     conn = get_conn()
@@ -976,6 +978,7 @@ if st.sidebar.button("退出登录"):
     st.session_state.role = None
     st.session_state.name = None
     st.session_state.student_id = None
+    st.session_state["selected_photo_item"] = None
     st.rerun()
 
 # ===== 全局：撤回导入按钮（3 分钟内有效） =====
@@ -1194,8 +1197,8 @@ if "🔍 查询与导出" in tab_dict:
                     photos = get_photos_for_items(item_names)
                     items_with_photos = [(name, photos.get(name)) for name in item_names if photos.get(name)]
                     if items_with_photos:
-                        st.markdown("### 📷 物资照片（点击缩略图查看详情）")
-                        render_photo_wall(items_with_photos, key_prefix="query")
+                        st.markdown("### 📷 物资照片")
+                        render_photo_wall(items_with_photos, key_prefix="query_only")
                     else:
                         st.caption("📷 暂无照片，可到「📷 物资照片」标签上传")
             else:
@@ -1208,8 +1211,8 @@ if "🔍 查询与导出" in tab_dict:
                     photos = get_photos_for_items(item_names)
                     items_with_photos = [(name, photos.get(name)) for name in item_names if photos.get(name)]
                     if items_with_photos:
-                        st.markdown("### 📷 物资照片（点击缩略图查看详情）")
-                        render_photo_wall(items_with_photos, key_prefix="query")
+                        st.markdown("### 📷 物资照片")
+                        render_photo_wall(items_with_photos, key_prefix="query_full")
 
                 st.markdown("### 📈 期间汇总")
                 summary_df = query_summary(keyword, start_dt, end_dt, category_filter)
@@ -1305,7 +1308,6 @@ if "🔍 查询与导出" in tab_dict:
 # ==================== Tab：物资照片 ====================
 if "📷 物资照片" in tab_dict:
     with tab_dict["📷 物资照片"]:
-        # ===== 详情模式 =====
         if st.session_state.get("selected_photo_item"):
             item_name = st.session_state["selected_photo_item"]
 
@@ -1341,7 +1343,6 @@ if "📷 物资照片" in tab_dict:
                 else:
                     st.dataframe(recent_df, use_container_width=True, hide_index=True)
 
-        # ===== 照片墙模式 =====
         else:
             st.subheader("📷 物资照片管理")
             st.caption("点击「🔍 查看详情」可查看放大照片、当前库存和最近 3 条出入库记录。")
@@ -1670,95 +1671,46 @@ if "👥 用户管理" in tab_dict:
 
 
 # ==================== Tab：修改密码 ====================
-if "📷 物资照片" in tab_dict:
-    with tab_dict["📷 物资照片"]:
-        # ===== 详情模式 =====
-        if st.session_state.get("selected_photo_item"):
-            item_name = st.session_state["selected_photo_item"]
+if "🔑 修改密码" in tab_dict:
+    with tab_dict["🔑 修改密码"]:
+        st.subheader("🔑 修改我的密码")
+        st.markdown(render_forgot_password_html(), unsafe_allow_html=True)
 
-            if st.button("← 返回照片墙", key="back_to_wall"):
-                st.session_state["selected_photo_item"] = None
-                st.rerun()
+        with st.form("change_pwd_form"):
+            st.markdown("##### 1. 身份信息核验")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                input_email = st.text_input("邮箱 *")
+            with col2:
+                input_name = st.text_input("姓名 *")
+            with col3:
+                input_student_id = st.text_input("学号 *")
 
-            st.markdown(f"### 📷 {item_name}")
+            st.divider()
+            st.markdown("##### 2. 密码设置")
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                old_pwd = st.text_input("旧密码 *", type="password")
+            with col5:
+                new_pwd = st.text_input("新密码 *", type="password")
+            with col6:
+                confirm_pwd = st.text_input("确认新密码 *", type="password")
 
-            photo_b64 = get_item_photo(item_name)
-            if not photo_b64:
-                st.warning("该物资暂无照片。")
-
-            col_left, col_right = st.columns([1, 1])
-
-            with col_left:
-                if photo_b64:
-                    try:
-                        img_bytes = base64.b64decode(photo_b64)
-                        st.image(img_bytes, use_container_width=True)
-                    except Exception:
-                        st.warning("照片加载失败")
-                    st.caption("提示：可右键图片 → 在新标签页打开图片查看原图。")
-
-            with col_right:
-                stock_qty = get_stock(item_name)
-                st.metric(label="📦 当前库存", value=int(stock_qty) if stock_qty is not None else 0)
-
-                st.markdown("##### 📋 最近 3 条出入库记录")
-                recent_df = get_recent_logs(item_name, limit=3)
-                if recent_df.empty:
-                    st.info("该物资暂无出入库记录。")
+            if st.form_submit_button("确认修改", type="primary"):
+                if not all([input_email, input_name, input_student_id, old_pwd, new_pwd, confirm_pwd]):
+                    st.error("所有字段都必须填写")
+                elif new_pwd != confirm_pwd:
+                    st.error("两次输入的新密码不一致")
+                elif len(new_pwd) < 6:
+                    st.error("新密码长度不能少于 6 位")
                 else:
-                    st.dataframe(recent_df, use_container_width=True, hide_index=True)
-
-        # ===== 照片墙模式 =====
-        else:
-            st.subheader("📷 物资照片管理")
-            st.caption("点击「🔍 查看详情」可查看放大照片、当前库存和最近 3 条出入库记录。")
-
-            existing_items = get_all_items()
-
-            if not existing_items:
-                st.info("暂无物资记录。请先到「📝 录入出入库」录入物资。")
-            else:
-                st.markdown("##### ⬆️ 上传 / 更新照片")
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    photo_item = st.selectbox("选择物资", existing_items, key="photo_item_select")
-                with col2:
-                    photo_file = st.file_uploader(
-                        "📷 选择照片（手机可直接拍照或从相册选择）",
-                        type=["jpg", "jpeg", "png", "webp"],
-                        key="photo_upload_file"
+                    ok, msg = change_user_password(
+                        st.session_state.user, input_email, input_name,
+                        input_student_id, old_pwd, new_pwd
                     )
-
-                if photo_file is not None:
-                    st.image(photo_file, caption="照片预览", width=240)
-                    if st.button("💾 保存照片", type="primary", key="btn_save_photo"):
-                        b64 = compress_image(photo_file.getvalue())
-                        if b64:
-                            upsert_item_photo(photo_item, b64)
-                            st.success(f"✅ 已保存 {photo_item} 的照片")
-                            st.rerun()
-                        else:
-                            st.error("照片处理失败，请重试或换一张图片。")
-
-                st.divider()
-                st.markdown("##### 🖼️ 现有照片")
-                all_photos = get_all_photos()
-
-                if all_photos.empty:
-                    st.info("还没有任何物资照片。可以在上方上传。")
-                else:
-                    items_with_photos = [(row["物品名称"], row["照片"]) for _, row in all_photos.iterrows()]
-                    render_photo_wall(items_with_photos, key_prefix="wall_photo")
-                    st.caption(f"共 {len(all_photos)} 个物资有照片。")
-
-                    st.markdown("##### 🗑️ 删除照片")
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        del_photo_item = st.selectbox("选择要删除照片的物资", all_photos["物品名称"].tolist(), key="del_photo_item")
-                    with col2:
-                        st.write("")
-                        st.write("")
-                        if st.button("🗑️ 删除该照片", key="btn_delete_photo"):
-                            delete_item_photo(del_photo_item)
-                            st.success(f"已删除 {del_photo_item} 的照片")
-                            st.rerun()
+                    if ok:
+                        st.success(msg)
+                        st.info("下次登录请使用新密码。")
+                        st.rerun()
+                    else:
+                        st.error(msg)
