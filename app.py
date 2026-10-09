@@ -12,8 +12,17 @@ import streamlit as st
 from passlib.hash import bcrypt
 from PIL import Image
 from openpyxl.worksheet.datavalidation import DataValidation
+import extra_streamlit_components as stx
 
 st.set_page_config(page_title="团委学生会物资管理", layout="wide")
+
+@st.cache_resource
+def get_cookie_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_cookie_manager()
+COOKIE_NAME = "stock_login_email"
+COOKIE_DAYS = 30
 
 CATEGORIES = ["办公用品", "活动物资", "宣传用品", "奖品/证书", "借用物资", "其他"]
 TAB_ROLES = {
@@ -22,7 +31,6 @@ TAB_ROLES = {
     "📷 物资照片": ["operator", "admin"],
     "📅 按学期查询": ["operator", "admin"],
     "⚙️ 学期管理": ["admin"],
-    "🔔 预警设置": ["operator", "admin"],
     "👥 用户管理": ["admin"],
     "🔑 修改密码": ["operator", "admin"],
 }
@@ -53,12 +61,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS semesters (
             id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE,
             start_date TEXT NOT NULL, end_date TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS stock_alert (
-            item_name TEXT PRIMARY KEY, min_quantity REAL NOT NULL DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cur.execute("""
@@ -238,6 +240,7 @@ def render_photo_wall(items_with_photos, key_prefix="wall"):
 
 
 # ==================== 用户管理 ====================
+@st.cache_data(ttl=120, show_spinner=False)
 def get_normal_admin_name():
     conn = get_conn()
     cur = conn.cursor()
@@ -677,9 +680,8 @@ def query_stock(keyword="", category="全部"):
         SELECT sl.item_name AS 物品名称, MAX(sl.category) AS 类别,
                SUM(CASE WHEN sl.change_type='IN'  THEN sl.quantity ELSE 0 END) AS 累计入库,
                SUM(CASE WHEN sl.change_type='OUT' THEN sl.quantity ELSE 0 END) AS 累计出库,
-               SUM(CASE WHEN sl.change_type='IN'  THEN sl.quantity ELSE -sl.quantity END) AS 当前库存,
-               MAX(sa.min_quantity) AS 预警阈值
-        FROM stock_log sl LEFT JOIN stock_alert sa ON sl.item_name = sa.item_name
+               SUM(CASE WHEN sl.change_type='IN'  THEN sl.quantity ELSE -sl.quantity END) AS 当前库存
+        FROM stock_log sl
         WHERE sl.item_name LIKE %s
     """
     params = [f"%{keyword}%"]
@@ -689,8 +691,6 @@ def query_stock(keyword="", category="全部"):
     sql += " GROUP BY sl.item_name ORDER BY sl.item_name"
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
-    if not df.empty:
-        df["状态"] = df.apply(lambda r: "⚠️ 库存不足" if pd.notna(r["预警阈值"]) and r["当前库存"] < r["预警阈值"] else "✅ 正常", axis=1)
     return df
 
 
@@ -698,7 +698,7 @@ def query_stock_only(keyword="", category="全部"):
     df = query_stock(keyword, category)
     if df.empty:
         return df
-    return df[["物品名称", "类别", "当前库存", "预警阈值", "状态"]]
+    return df[["物品名称", "类别", "当前库存"]]
 
 
 def query_logs(keyword, start_dt, end_dt, category="全部"):
@@ -749,6 +749,7 @@ def query_ranking(start_dt, end_dt, top_n=10):
     return df
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_items():
     conn = get_conn()
     df = pd.read_sql_query("SELECT DISTINCT item_name FROM stock_log ORDER BY item_name", conn)
@@ -756,37 +757,7 @@ def get_all_items():
     return df["item_name"].tolist()
 
 
-def get_alerts():
-    conn = get_conn()
-    df = pd.read_sql_query("""
-        SELECT sa.item_name AS 物品名称, sa.min_quantity AS 预警阈值, sa.updated_at AS 更新时间,
-               COALESCE((SELECT SUM(CASE WHEN change_type='IN' THEN quantity ELSE -quantity END) FROM stock_log WHERE item_name = sa.item_name), 0) AS 当前库存
-        FROM stock_alert sa ORDER BY sa.item_name
-    """, conn)
-    conn.close()
-    if not df.empty:
-        df["状态"] = df.apply(lambda r: "⚠️ 库存不足" if r["当前库存"] < r["预警阈值"] else "✅ 正常", axis=1)
-    return df
-
-
-def set_alert(item_name, min_quantity):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO stock_alert(item_name, min_quantity, updated_at) VALUES (%s, %s, CURRENT_TIMESTAMP) ON CONFLICT(item_name) DO UPDATE SET min_quantity = EXCLUDED.min_quantity, updated_at = CURRENT_TIMESTAMP", (item_name, min_quantity))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def delete_alert(item_name):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM stock_alert WHERE item_name=%s", (item_name,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
+@st.cache_data(ttl=300, show_spinner=False)
 def get_semesters():
     conn = get_conn()
     df = pd.read_sql_query("SELECT id, name AS 学期名称, start_date AS 开始日期, end_date AS 结束日期 FROM semesters ORDER BY start_date DESC", conn)
@@ -830,7 +801,7 @@ def _prepare_stock_df(keyword="", category="全部"):
     df = query_stock(keyword, category)
     if df.empty:
         return df
-    return df[["物品名称", "类别", "累计入库", "累计出库", "当前库存", "预警阈值", "状态"]]
+    return df[["物品名称", "类别", "累计入库", "累计出库", "当前库存"]]
 
 
 def _register_chinese_font():
@@ -915,7 +886,7 @@ def export_multi_items_pdf(detail_df, selected_items):
     return buffer.getvalue()
 
 
-# ==================== 登录 ====================
+# ==================== 登录（带 Cookie 持久化） ====================
 if "user" not in st.session_state:
     st.session_state.user = None
     st.session_state.role = None
@@ -923,13 +894,27 @@ if "user" not in st.session_state:
     st.session_state.student_id = None
 
 if st.session_state.user is None:
-    st.title("📦 团委学生会物资管理系统")
+    try:
+        saved_email = cookie_manager.get(COOKIE_NAME)
+        if saved_email:
+            user = get_user(saved_email)
+            if user:
+                st.session_state.user = user[0]
+                st.session_state.role = user[2]
+                st.session_state.name = user[3]
+                st.session_state.student_id = user[4]
+                st.rerun()
+    except Exception:
+        pass
 
+if st.session_state.user is None:
+    st.title("📦 团委学生会物资管理系统")
     st.subheader("请登录")
     st.markdown(render_contact_html(), unsafe_allow_html=True)
     with st.form("login_form"):
         identifier = st.text_input("邮箱或学号")
         password = st.text_input("密码", type="password")
+        remember = st.checkbox("🔄 保持登录状态（30天内免登录）", value=True, key="login_remember")
         if st.form_submit_button("登录", type="primary"):
             if not identifier or not password:
                 st.error("请填写账号和密码")
@@ -940,10 +925,19 @@ if st.session_state.user is None:
                     st.session_state.role = user[2]
                     st.session_state.name = user[3]
                     st.session_state.student_id = user[4]
+                    if remember:
+                        try:
+                            cookie_manager.set(
+                                COOKIE_NAME,
+                                user[0],
+                                expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
+                                key="set_cookie_login"
+                            )
+                        except Exception:
+                            pass
                     st.rerun()
                 else:
                     st.error("账号或密码错误")
-
     st.stop()
 
 if not st.session_state.name or not st.session_state.student_id:
@@ -964,6 +958,7 @@ if not st.session_state.name or not st.session_state.student_id:
                 update_user_profile(st.session_state.user, name.strip(), student_id.strip())
                 st.session_state.name = name.strip()
                 st.session_state.student_id = student_id.strip()
+                st.cache_data.clear()
                 st.rerun()
     st.stop()
 
@@ -974,6 +969,10 @@ st.sidebar.markdown(f"**邮箱**：{st.session_state.user}")
 _role_label = "Admin（管理员）" if st.session_state.role == "admin" else "Operator（操作员）"
 st.sidebar.markdown(f"**角色**：{_role_label}")
 if st.sidebar.button("退出登录"):
+    try:
+        cookie_manager.delete(COOKIE_NAME, key="del_cookie_login")
+    except Exception:
+        pass
     st.session_state.user = None
     st.session_state.role = None
     st.session_state.name = None
@@ -981,7 +980,6 @@ if st.sidebar.button("退出登录"):
     st.session_state["selected_photo_item"] = None
     st.rerun()
 
-# ===== 全局：撤回导入按钮（3 分钟内有效） =====
 if "last_batch" in st.session_state and st.session_state.last_batch:
     batch_info = st.session_state.last_batch
     elapsed = (datetime.now() - batch_info["time"]).total_seconds()
@@ -993,17 +991,12 @@ if "last_batch" in st.session_state and st.session_state.last_batch:
         with col_b:
             if st.button("↩️ 撤回本次导入", type="primary", key="undo_batch_btn"):
                 count = undo_batch(batch_info["id"])
+                st.cache_data.clear()
                 st.success(f"已撤回 {count} 条记录。")
                 st.session_state.last_batch = None
                 st.rerun()
     else:
         st.session_state.last_batch = None
-
-_alerts = get_alerts()
-if not _alerts.empty:
-    _short = _alerts[_alerts["状态"] == "⚠️ 库存不足"]
-    if not _short.empty:
-        st.warning(f"⚠️ 当前有 {len(_short)} 种物品库存低于预警阈值，请及时补充。")
 
 role = st.session_state.role
 allowed = [name for name, roles in TAB_ROLES.items() if role in roles]
@@ -1082,6 +1075,7 @@ if "📝 录入出入库" in tab_dict:
                                     b64 = compress_image(photo_file.getvalue())
                                     if b64:
                                         upsert_item_photo(clean_name, b64)
+                                st.cache_data.clear()
                                 st.success(f"✅ 已录入出库：{clean_name} × {quantity}（{single_final_date}）")
                         else:
                             insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
@@ -1089,6 +1083,7 @@ if "📝 录入出入库" in tab_dict:
                                 b64 = compress_image(photo_file.getvalue())
                                 if b64:
                                     upsert_item_photo(clean_name, b64)
+                            st.cache_data.clear()
                             st.success(f"✅ 已录入入库：{clean_name} × {quantity}（{single_final_date}）")
         else:
             st.markdown("##### 📋 使用说明")
@@ -1150,6 +1145,7 @@ if "📝 录入出入库" in tab_dict:
                             with st.spinner("导入中..."):
                                 success, errors, batch_id = import_logs_from_parsed(rows, st.session_state.name, final_date)
                             if success > 0:
+                                st.cache_data.clear()
                                 st.session_state.last_batch = {
                                     "id": batch_id,
                                     "time": datetime.now(),
@@ -1265,7 +1261,6 @@ if "🔍 查询与导出" in tab_dict:
                                 stock_export_df.to_excel(writer, sheet_name="库存汇总", index=False)
                             st.download_button("⬇️ 点击下载 Excel", output.getvalue(), file_name=f"物资库存汇总_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
-        # ===== Admin 删除任意记录 =====
         if st.session_state.role == "admin":
             st.divider()
             st.markdown("#### 🗑️ 删除记录（仅 Admin）")
@@ -1299,6 +1294,7 @@ if "🔍 查询与导出" in tab_dict:
                         if st.button("🗑️ 删除该记录", type="primary", key="btn_delete_log"):
                             count = delete_log_by_id(int(selected_log_id))
                             if count > 0:
+                                st.cache_data.clear()
                                 st.success(f"已删除记录 ID {selected_log_id}。")
                                 st.rerun()
                             else:
@@ -1369,6 +1365,7 @@ if "📷 物资照片" in tab_dict:
                         b64 = compress_image(photo_file.getvalue())
                         if b64:
                             upsert_item_photo(photo_item, b64)
+                            st.cache_data.clear()
                             st.success(f"✅ 已保存 {photo_item} 的照片")
                             st.rerun()
                         else:
@@ -1394,6 +1391,7 @@ if "📷 物资照片" in tab_dict:
                         st.write("")
                         if st.button("🗑️ 删除该照片", key="photo_tab_btn_delete"):
                             delete_item_photo(del_photo_item)
+                            st.cache_data.clear()
                             st.success(f"已删除 {del_photo_item} 的照片")
                             st.rerun()
 
@@ -1462,6 +1460,7 @@ if "⚙️ 学期管理" in tab_dict:
                 else:
                     ok, msg = add_semester(new_name.strip(), new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"))
                     if ok:
+                        st.cache_data.clear()
                         st.success(msg)
                         st.rerun()
                     else:
@@ -1477,50 +1476,8 @@ if "⚙️ 学期管理" in tab_dict:
                 if st.button("删除"):
                     sid = int(semesters_df[semesters_df["学期名称"] == del_name]["id"].iloc[0])
                     delete_semester(sid)
+                    st.cache_data.clear()
                     st.success(f"已删除：{del_name}")
-                    st.rerun()
-
-
-# ==================== Tab：预警设置 ====================
-if "🔔 预警设置" in tab_dict:
-    with tab_dict["🔔 预警设置"]:
-        st.subheader("🔔 库存预警设置")
-        st.caption("为物品设置最低库存量。低于该值时，库存表会标注「⚠️ 库存不足」。")
-        st.markdown("##### 当前预警列表")
-        alerts_df = get_alerts()
-        if alerts_df.empty:
-            st.info("还没有设置任何预警。可在下方添加。")
-        else:
-            st.dataframe(alerts_df, use_container_width=True, hide_index=True)
-        st.markdown("##### 添加 / 修改预警")
-        items = get_all_items()
-        col1, col2 = st.columns(2)
-        with col1:
-            alert_mode = st.radio("选择物品方式", ["从已有物品选择", "手动输入物品名称"], horizontal=True)
-        with col2:
-            if alert_mode == "从已有物品选择" and items:
-                alert_item = st.selectbox("选择物品", items)
-            else:
-                alert_item = st.text_input("物品名称")
-        alert_qty = st.number_input("最低库存阈值", min_value=0, step=1, value=0, format="%d")
-        if st.button("💾 保存预警", type="primary"):
-            if not alert_item or not alert_item.strip():
-                st.error("请先选择或输入物品名称")
-            else:
-                set_alert(alert_item.strip(), alert_qty)
-                st.success(f"已设置：【{alert_item}】最低库存 {alert_qty}")
-                st.rerun()
-        st.markdown("##### 删除预警")
-        if not alerts_df.empty:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                del_alert = st.selectbox("选择要删除预警的物品", alerts_df["物品名称"].tolist())
-            with col2:
-                st.write("")
-                st.write("")
-                if st.button("删除预警"):
-                    delete_alert(del_alert)
-                    st.success(f"已删除预警：{del_alert}")
                     st.rerun()
 
 
@@ -1571,6 +1528,7 @@ if "👥 用户管理" in tab_dict:
                 else:
                     ok, msg = create_user(new_email.strip(), new_name.strip(), new_student_id.strip())
                     if ok:
+                        st.cache_data.clear()
                         st.success(f"已添加：{new_name}（{new_student_id}）- {new_email}。{msg}")
                         st.rerun()
                     else:
@@ -1604,6 +1562,7 @@ if "👥 用户管理" in tab_dict:
                 if st.button("👤 设为普通 Admin", type="primary"):
                     ok, msg = set_normal_admin(target_email_na)
                     if ok:
+                        st.cache_data.clear()
                         st.success(msg)
                         st.rerun()
                     else:
@@ -1635,6 +1594,7 @@ if "👥 用户管理" in tab_dict:
                     if st.button("确认转让", type="primary"):
                         ok, msg = transfer_admin(st.session_state.user, transfer_email)
                         if ok:
+                            st.cache_data.clear()
                             st.success(msg)
                             st.session_state.role = "operator"
                             st.rerun()
@@ -1655,6 +1615,7 @@ if "👥 用户管理" in tab_dict:
             with col1:
                 if st.button("重置密码为 123456"):
                     reset_user_password(target_email)
+                    st.cache_data.clear()
                     st.success(f"已重置 {target_email} 的密码为 123456。")
             with col2:
                 if st.button("🗑️ 删除该用户"):
@@ -1666,6 +1627,7 @@ if "👥 用户管理" in tab_dict:
                         st.error("不能删除管理员账号，请先转让 Admin 权限")
                     else:
                         delete_user(target_email)
+                        st.cache_data.clear()
                         st.success(f"已删除：{target_email}")
                         st.rerun()
 
