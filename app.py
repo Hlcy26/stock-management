@@ -2,13 +2,16 @@
 
 import io
 import os
+import base64
 import uuid
+import urllib.parse
 from datetime import datetime, date, time, timezone, timedelta
 
 import pandas as pd
 import psycopg2
 import streamlit as st
 from passlib.hash import bcrypt
+from PIL import Image
 from openpyxl.worksheet.datavalidation import DataValidation
 
 st.set_page_config(page_title="团委学生会物资管理", layout="wide")
@@ -17,6 +20,7 @@ CATEGORIES = ["办公用品", "活动物资", "宣传用品", "奖品/证书", "
 TAB_ROLES = {
     "📝 录入出入库": ["operator", "admin"],
     "🔍 查询与导出": ["operator", "admin"],
+    "📷 物资照片": ["operator", "admin"],
     "📅 按学期查询": ["operator", "admin"],
     "⚙️ 学期管理": ["admin"],
     "🔔 预警设置": ["operator", "admin"],
@@ -72,6 +76,13 @@ def init_db():
     cur.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50)")
     cur.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_change_count INT DEFAULT 0")
     cur.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_permanent_admin BOOLEAN DEFAULT FALSE")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS item_photos (
+            item_name TEXT PRIMARY KEY,
+            photo_base64 TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
     cur.execute("SELECT COUNT(*) FROM semesters")
     if cur.fetchone()[0] == 0:
@@ -112,6 +123,135 @@ except Exception as e:
     st.stop()
 
 
+# ==================== 照片相关 ====================
+def compress_image(file_bytes, max_size=800, quality=75):
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_size:
+            if w >= h:
+                new_w = max_size
+                new_h = int(h * max_size / w)
+            else:
+                new_h = max_size
+                new_w = int(w * max_size / h)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        return None
+
+
+def upsert_item_photo(item_name, photo_base64):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO item_photos(item_name, photo_base64, updated_at)
+        VALUES (%s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT(item_name) DO UPDATE SET
+            photo_base64 = EXCLUDED.photo_base64,
+            updated_at = CURRENT_TIMESTAMP
+    """, (item_name, photo_base64))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_item_photo(item_name):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT photo_base64 FROM item_photos WHERE item_name = %s", (item_name,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_photos_for_items(item_names):
+    if not item_names:
+        return {}
+    conn = get_conn()
+    cur = conn.cursor()
+    placeholders = ",".join(["%s"] * len(item_names))
+    cur.execute(f"SELECT item_name, photo_base64 FROM item_photos WHERE item_name IN ({placeholders})", list(item_names))
+    result = {row[0]: row[1] for row in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return result
+
+
+def get_all_photos():
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT item_name AS 物品名称, photo_base64 AS 照片, updated_at AS 更新时间 FROM item_photos ORDER BY item_name", conn)
+    conn.close()
+    return df
+
+
+def delete_item_photo(item_name):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM item_photos WHERE item_name = %s", (item_name,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_recent_logs(item_name, limit=3):
+    """获取某物资最近 N 条出入库记录"""
+    conn = get_conn()
+    df = pd.read_sql_query("""
+        SELECT log_time AS 时间,
+               CASE change_type WHEN 'IN' THEN '入库' ELSE '出库' END AS 类型,
+               quantity AS 数量,
+               operator AS 操作人,
+               note AS 备注
+        FROM stock_log
+        WHERE item_name = %s
+        ORDER BY id DESC
+        LIMIT %s
+    """, conn, params=(item_name, limit))
+    conn.close()
+    return df
+
+
+def render_photo_wall(items_with_photos, clickable=True, key_prefix=""):
+    """渲染照片墙。clickable=True 时图片可点击进入详情页。"""
+    if not items_with_photos:
+        return
+    html = '<div style="display:flex; flex-wrap:wrap; gap:14px; margin-top:8px;">'
+    for idx, (item_name, photo_b64) in enumerate(items_with_photos):
+        if not photo_b64:
+            continue
+        src = f"data:image/jpeg;base64,{photo_b64}"
+        if clickable:
+            href = f"?photo_item={urllib.parse.quote(item_name)}&tab=photo"
+            img_html = (
+                f'<a href="{href}" target="_self" title="点击查看详情">'
+                f'<img src="{src}" style="width:130px; height:130px; object-fit:cover; '
+                f'border-radius:8px; border:1px solid #555; cursor:pointer;">'
+                f'</a>'
+            )
+        else:
+            img_html = (
+                f'<a href="{src}" target="_blank" title="点击查看大图">'
+                f'<img src="{src}" style="width:130px; height:130px; object-fit:cover; '
+                f'border-radius:8px; border:1px solid #555; cursor:zoom-in;">'
+                f'</a>'
+            )
+        html += f'''
+        <div style="text-align:center; width:140px;">
+            {img_html}
+            <div style="font-size:12px; margin-top:6px; color:#ccc; word-break:break-all;">{item_name}</div>
+        </div>
+        '''
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ==================== 用户管理 ====================
 def get_normal_admin_name():
     conn = get_conn()
     cur = conn.cursor()
@@ -361,6 +501,7 @@ def change_user_password(current_login_email, input_email, input_name, input_stu
     return True, "✅ 密码修改成功，请使用新密码登录"
 
 
+# ==================== 出入库 ====================
 def insert_log(item_name, category, change_type, quantity, log_time, note, operator):
     conn = get_conn()
     cur = conn.cursor()
@@ -788,6 +929,7 @@ def export_multi_items_pdf(detail_df, selected_items):
     return buffer.getvalue()
 
 
+# ==================== 登录 ====================
 if "user" not in st.session_state:
     st.session_state.user = None
     st.session_state.role = None
@@ -882,6 +1024,7 @@ tab_objs = st.tabs(allowed)
 tab_dict = dict(zip(allowed, tab_objs))
 
 
+# ==================== Tab：录入出入库 ====================
 if "📝 录入出入库" in tab_dict:
     with tab_dict["📝 录入出入库"]:
         st.subheader("录入出入库")
@@ -916,6 +1059,14 @@ if "📝 录入出入库" in tab_dict:
 
                 st.info(f"📌 操作人：{st.session_state.name}　|　📅 日期：{single_final_date}（{single_date_source}）")
 
+                photo_file = st.file_uploader(
+                    "📷 物资照片（可选，手机可直接拍照或从相册选择）",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="entry_photo"
+                )
+                if photo_file is not None:
+                    st.image(photo_file, caption="照片预览", width=200)
+
                 col3, col4 = st.columns(2)
                 with col3:
                     note = st.text_input("备注")
@@ -940,9 +1091,17 @@ if "📝 录入出入库" in tab_dict:
                                 st.error(f"{clean_name} 库存不足，请确认后再输入！")
                             else:
                                 insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
+                                if photo_file is not None:
+                                    b64 = compress_image(photo_file.getvalue())
+                                    if b64:
+                                        upsert_item_photo(clean_name, b64)
                                 st.success(f"✅ 已录入出库：{clean_name} × {quantity}（{single_final_date}）")
                         else:
                             insert_log(clean_name, category, change_type, quantity, log_time, note, clean_operator)
+                            if photo_file is not None:
+                                b64 = compress_image(photo_file.getvalue())
+                                if b64:
+                                    upsert_item_photo(clean_name, b64)
                             st.success(f"✅ 已录入入库：{clean_name} × {quantity}（{single_final_date}）")
         else:
             st.markdown("##### 📋 使用说明")
@@ -953,6 +1112,7 @@ if "📝 录入出入库" in tab_dict:
             4. 每个类别下有三列：**物品名称**、**数量**、**备注**
             5. 从第 3 行开始填写数据，数量填写正整数
             6. 上传填好的 Excel 文件，确认导入。导入后 3 分钟内可以撤回
+            7. 📷 **照片请在导入完成后到「📷 物资照片」标签单独上传**（Excel 单元格无法内嵌图片）
             """)
 
             col_d1, col_d2 = st.columns([1, 2])
@@ -1020,6 +1180,7 @@ if "📝 录入出入库" in tab_dict:
                     st.error(f"处理文件失败：{e}")
 
 
+# ==================== Tab：查询与导出 ====================
 if "🔍 查询与导出" in tab_dict:
     with tab_dict["🔍 查询与导出"]:
         st.subheader("查询与导出")
@@ -1041,11 +1202,30 @@ if "🔍 查询与导出" in tab_dict:
 
             if only_stock:
                 st.markdown("### 📊 所有物品库存")
-                st.dataframe(query_stock_only(keyword, category_filter), use_container_width=True, hide_index=True)
+                stock_only_df = query_stock_only(keyword, category_filter)
+                st.dataframe(stock_only_df, use_container_width=True, hide_index=True)
+
+                if not stock_only_df.empty:
+                    item_names = stock_only_df["物品名称"].tolist()
+                    photos = get_photos_for_items(item_names)
+                    items_with_photos = [(name, photos.get(name)) for name in item_names if photos.get(name)]
+                    if items_with_photos:
+                        st.markdown("### 📷 物资照片（点击缩略图查看详情）")
+                        render_photo_wall(items_with_photos, clickable=True)
+                    else:
+                        st.caption("📷 暂无照片，可到「📷 物资照片」标签上传")
             else:
                 st.markdown("### 📊 当前库存")
                 stock_df = query_stock(keyword, category_filter)
                 st.dataframe(stock_df, use_container_width=True, hide_index=True)
+
+                if not stock_df.empty:
+                    item_names = stock_df["物品名称"].tolist()
+                    photos = get_photos_for_items(item_names)
+                    items_with_photos = [(name, photos.get(name)) for name in item_names if photos.get(name)]
+                    if items_with_photos:
+                        st.markdown("### 📷 物资照片（点击缩略图查看详情）")
+                        render_photo_wall(items_with_photos, clickable=True)
 
                 st.markdown("### 📈 期间汇总")
                 summary_df = query_summary(keyword, start_dt, end_dt, category_filter)
@@ -1098,7 +1278,7 @@ if "🔍 查询与导出" in tab_dict:
                                 stock_export_df.to_excel(writer, sheet_name="库存汇总", index=False)
                             st.download_button("⬇️ 点击下载 Excel", output.getvalue(), file_name=f"物资库存汇总_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
-        # ===== Admin 删除任意记录（不限时间） =====
+        # ===== Admin 删除任意记录 =====
         if st.session_state.role == "admin":
             st.divider()
             st.markdown("#### 🗑️ 删除记录（仅 Admin）")
@@ -1138,6 +1318,115 @@ if "🔍 查询与导出" in tab_dict:
                                 st.error("删除失败，记录可能已被删除。")
 
 
+# ==================== Tab：物资照片 ====================
+if "📷 物资照片" in tab_dict:
+    with tab_dict["📷 物资照片"]:
+        # 检查是否点击了某张照片 → 进入详情模式
+        qp_item = st.query_params.get("photo_item", None)
+        if isinstance(qp_item, list):
+            qp_item = qp_item[0] if qp_item else None
+
+        if qp_item:
+            # ====== 详情模式 ======
+            item_name = urllib.parse.unquote(str(qp_item))
+
+            col_back, _ = st.columns([1, 5])
+            with col_back:
+                if st.button("← 返回照片墙", key="back_to_wall"):
+                    st.query_params.clear()
+                    st.rerun()
+
+            st.markdown(f"### 📷 {item_name}")
+
+            photo_b64 = get_item_photo(item_name)
+            if not photo_b64:
+                st.warning("该物资暂无照片。")
+
+            col_left, col_right = st.columns([1, 1])
+
+            with col_left:
+                if photo_b64:
+                    src = f"data:image/jpeg;base64,{photo_b64}"
+                    st.markdown(
+                        f'<div style="text-align:center;">'
+                        f'<img src="{src}" style="max-width:100%; max-height:520px; '
+                        f'border-radius:10px; border:1px solid #555; box-shadow:0 2px 10px rgba(0,0,0,0.4);">'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                    st.caption("提示：右键图片可选择「在新标签页中打开图片」查看原图。")
+
+            with col_right:
+                stock_qty = get_stock(item_name)
+                st.metric(label="📦 当前库存", value=int(stock_qty) if stock_qty is not None else 0)
+
+                st.markdown("##### 📋 最近 3 条出入库记录")
+                recent_df = get_recent_logs(item_name, limit=3)
+                if recent_df.empty:
+                    st.info("该物资暂无出入库记录。")
+                else:
+                    st.dataframe(recent_df, use_container_width=True, hide_index=True)
+
+        else:
+            # ====== 照片墙模式 ======
+            st.subheader("📷 物资照片管理")
+            st.caption("点击缩略图可查看**放大照片、当前库存和最近 3 条出入库记录**。")
+
+            existing_items = get_all_items()
+
+            if not existing_items:
+                st.info("暂无物资记录。请先到「📝 录入出入库」录入物资。")
+            else:
+                st.markdown("##### ⬆️ 上传 / 更新照片")
+
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    photo_item = st.selectbox("选择物资", existing_items, key="photo_item_select")
+                with col2:
+                    photo_file = st.file_uploader(
+                        "📷 选择照片（手机可直接拍照或从相册选择）",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        key="photo_upload_file"
+                    )
+
+                if photo_file is not None:
+                    st.image(photo_file, caption="照片预览", width=240)
+
+                    if st.button("💾 保存照片", type="primary", key="btn_save_photo"):
+                        b64 = compress_image(photo_file.getvalue())
+                        if b64:
+                            upsert_item_photo(photo_item, b64)
+                            st.success(f"✅ 已保存 {photo_item} 的照片")
+                            st.rerun()
+                        else:
+                            st.error("照片处理失败，请重试或换一张图片。")
+
+                st.divider()
+                st.markdown("##### 🖼️ 现有照片")
+                st.caption("👉 点击任意缩略图，查看放大照片 + 库存 + 最近 3 条记录")
+                all_photos = get_all_photos()
+
+                if all_photos.empty:
+                    st.info("还没有任何物资照片。可以在上方上传。")
+                else:
+                    items_with_photos = [(row["物品名称"], row["照片"]) for _, row in all_photos.iterrows()]
+                    render_photo_wall(items_with_photos, clickable=True)
+                    st.caption(f"共 {len(all_photos)} 个物资有照片。")
+
+                    st.markdown("##### 🗑️ 删除照片")
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        del_photo_item = st.selectbox("选择要删除照片的物资", all_photos["物品名称"].tolist(), key="del_photo_item")
+                    with col2:
+                        st.write("")
+                        st.write("")
+                        if st.button("🗑️ 删除该照片", key="btn_delete_photo"):
+                            delete_item_photo(del_photo_item)
+                            st.success(f"已删除 {del_photo_item} 的照片")
+                            st.rerun()
+
+
+# ==================== Tab：按学期查询 ====================
 if "📅 按学期查询" in tab_dict:
     with tab_dict["📅 按学期查询"]:
         st.subheader("按学期查询")
@@ -1177,6 +1466,7 @@ if "📅 按学期查询" in tab_dict:
                     st.download_button("⬇️ 导出学期汇总 CSV", summary_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"{sem_name}_库存汇总.csv", mime="text/csv")
 
 
+# ==================== Tab：学期管理 ====================
 if "⚙️ 学期管理" in tab_dict:
     with tab_dict["⚙️ 学期管理"]:
         st.subheader("学期管理")
@@ -1219,6 +1509,7 @@ if "⚙️ 学期管理" in tab_dict:
                     st.rerun()
 
 
+# ==================== Tab：预警设置 ====================
 if "🔔 预警设置" in tab_dict:
     with tab_dict["🔔 预警设置"]:
         st.subheader("🔔 库存预警设置")
@@ -1261,6 +1552,7 @@ if "🔔 预警设置" in tab_dict:
                     st.rerun()
 
 
+# ==================== Tab：用户管理 ====================
 if "👥 用户管理" in tab_dict:
     with tab_dict["👥 用户管理"]:
         st.subheader("👥 用户管理")
@@ -1406,6 +1698,7 @@ if "👥 用户管理" in tab_dict:
                         st.rerun()
 
 
+# ==================== Tab：修改密码 ====================
 if "🔑 修改密码" in tab_dict:
     with tab_dict["🔑 修改密码"]:
         st.subheader("🔑 修改我的密码")
