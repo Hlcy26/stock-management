@@ -217,40 +217,18 @@ def get_recent_logs(item_name, limit=3):
     return df
 
 
-def render_photo_wall(items_with_photos, clickable=True, key_prefix=""):
+def get_recent_logs(item_name, limit=3):
+    ...
+
+def render_photo_wall(items_with_photos, clickable=True, key_prefix=""):   ← 从这个 def 开始
     """渲染照片墙。clickable=True 时图片可点击进入详情页。"""
-    if not items_with_photos:
-        return
-    html = '<div style="display:flex; flex-wrap:wrap; gap:14px; margin-top:8px;">'
-    for idx, (item_name, photo_b64) in enumerate(items_with_photos):
-        if not photo_b64:
-            continue
-        src = f"data:image/jpeg;base64,{photo_b64}"
-        if clickable:
-            href = f"?photo_item={urllib.parse.quote(item_name)}&tab=photo"
-            img_html = (
-                f'<a href="{href}" target="_self" title="点击查看详情">'
-                f'<img src="{src}" style="width:130px; height:130px; object-fit:cover; '
-                f'border-radius:8px; border:1px solid #555; cursor:pointer;">'
-                f'</a>'
-            )
-        else:
-            img_html = (
-                f'<a href="{src}" target="_blank" title="点击查看大图">'
-                f'<img src="{src}" style="width:130px; height:130px; object-fit:cover; '
-                f'border-radius:8px; border:1px solid #555; cursor:zoom-in;">'
-                f'</a>'
-            )
-        html += f'''
-        <div style="text-align:center; width:140px;">
-            {img_html}
-            <div style="font-size:12px; margin-top:6px; color:#ccc; word-break:break-all;">{item_name}</div>
-        </div>
-        '''
-    html += '</div>'
-    st.markdown(html, unsafe_allow_html=True)
+    ...
+    st.markdown(html, unsafe_allow_html=True)                              ← 替换到这里结束
 
 
+# ==================== 用户管理 ====================  ← 这行不要动
+def get_normal_admin_name():
+    ...
 # ==================== 用户管理 ====================
 def get_normal_admin_name():
     conn = get_conn()
