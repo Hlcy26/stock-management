@@ -1305,20 +1305,13 @@ if "🔍 查询与导出" in tab_dict:
 # ==================== Tab：物资照片 ====================
 if "📷 物资照片" in tab_dict:
     with tab_dict["📷 物资照片"]:
-        # 检查是否点击了某张照片 → 进入详情模式
-        qp_item = st.query_params.get("photo_item", None)
-        if isinstance(qp_item, list):
-            qp_item = qp_item[0] if qp_item else None
+        # ===== 详情模式 =====
+        if st.session_state.get("selected_photo_item"):
+            item_name = st.session_state["selected_photo_item"]
 
-        if qp_item:
-            # ====== 详情模式 ======
-            item_name = urllib.parse.unquote(str(qp_item))
-
-            col_back, _ = st.columns([1, 5])
-            with col_back:
-                if st.button("← 返回照片墙", key="back_to_wall"):
-                    st.query_params.clear()
-                    st.rerun()
+            if st.button("← 返回照片墙", key="photo_tab_back"):
+                st.session_state["selected_photo_item"] = None
+                st.rerun()
 
             st.markdown(f"### 📷 {item_name}")
 
@@ -1330,15 +1323,12 @@ if "📷 物资照片" in tab_dict:
 
             with col_left:
                 if photo_b64:
-                    src = f"data:image/jpeg;base64,{photo_b64}"
-                    st.markdown(
-                        f'<div style="text-align:center;">'
-                        f'<img src="{src}" style="max-width:100%; max-height:520px; '
-                        f'border-radius:10px; border:1px solid #555; box-shadow:0 2px 10px rgba(0,0,0,0.4);">'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
-                    st.caption("提示：右键图片可选择「在新标签页中打开图片」查看原图。")
+                    try:
+                        img_bytes = base64.b64decode(photo_b64)
+                        st.image(img_bytes, use_container_width=True)
+                    except Exception:
+                        st.warning("照片加载失败")
+                    st.caption("提示：可右键图片 → 在新标签页打开图片查看原图。")
 
             with col_right:
                 stock_qty = get_stock(item_name)
@@ -1351,10 +1341,10 @@ if "📷 物资照片" in tab_dict:
                 else:
                     st.dataframe(recent_df, use_container_width=True, hide_index=True)
 
+        # ===== 照片墙模式 =====
         else:
-            # ====== 照片墙模式 ======
             st.subheader("📷 物资照片管理")
-            st.caption("点击缩略图可查看**放大照片、当前库存和最近 3 条出入库记录**。")
+            st.caption("点击「🔍 查看详情」可查看放大照片、当前库存和最近 3 条出入库记录。")
 
             existing_items = get_all_items()
 
@@ -1362,21 +1352,19 @@ if "📷 物资照片" in tab_dict:
                 st.info("暂无物资记录。请先到「📝 录入出入库」录入物资。")
             else:
                 st.markdown("##### ⬆️ 上传 / 更新照片")
-
                 col1, col2 = st.columns([1, 1])
                 with col1:
-                    photo_item = st.selectbox("选择物资", existing_items, key="photo_item_select")
+                    photo_item = st.selectbox("选择物资", existing_items, key="photo_tab_item_select")
                 with col2:
                     photo_file = st.file_uploader(
                         "📷 选择照片（手机可直接拍照或从相册选择）",
                         type=["jpg", "jpeg", "png", "webp"],
-                        key="photo_upload_file"
+                        key="photo_tab_upload_file"
                     )
 
                 if photo_file is not None:
                     st.image(photo_file, caption="照片预览", width=240)
-
-                    if st.button("💾 保存照片", type="primary", key="btn_save_photo"):
+                    if st.button("💾 保存照片", type="primary", key="photo_tab_btn_save"):
                         b64 = compress_image(photo_file.getvalue())
                         if b64:
                             upsert_item_photo(photo_item, b64)
@@ -1387,24 +1375,23 @@ if "📷 物资照片" in tab_dict:
 
                 st.divider()
                 st.markdown("##### 🖼️ 现有照片")
-                st.caption("👉 点击任意缩略图，查看放大照片 + 库存 + 最近 3 条记录")
                 all_photos = get_all_photos()
 
                 if all_photos.empty:
                     st.info("还没有任何物资照片。可以在上方上传。")
                 else:
                     items_with_photos = [(row["物品名称"], row["照片"]) for _, row in all_photos.iterrows()]
-                    render_photo_wall(items_with_photos, key_prefix="query")
+                    render_photo_wall(items_with_photos, key_prefix="photo_tab_wall")
                     st.caption(f"共 {len(all_photos)} 个物资有照片。")
 
                     st.markdown("##### 🗑️ 删除照片")
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        del_photo_item = st.selectbox("选择要删除照片的物资", all_photos["物品名称"].tolist(), key="del_photo_item")
+                        del_photo_item = st.selectbox("选择要删除照片的物资", all_photos["物品名称"].tolist(), key="photo_tab_del_item")
                     with col2:
                         st.write("")
                         st.write("")
-                        if st.button("🗑️ 删除该照片", key="btn_delete_photo"):
+                        if st.button("🗑️ 删除该照片", key="photo_tab_btn_delete"):
                             delete_item_photo(del_photo_item)
                             st.success(f"已删除 {del_photo_item} 的照片")
                             st.rerun()
